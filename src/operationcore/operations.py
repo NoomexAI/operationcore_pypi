@@ -9,7 +9,7 @@ import math
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -23,6 +23,7 @@ from .config import EventConfig, OperationConfig
 from .errors import ErrorCode, OperationError, error_payload
 from .events import Event, EventStream, EventType
 from .operation_store import SQLiteOperationStore
+from .retry import RetryPolicy
 
 
 class OperationStatus(StrEnum):
@@ -31,35 +32,6 @@ class OperationStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
-
-
-class RetryPolicy(StrEnum):
-    """User-visible retry behavior allowed for an operation task."""
-
-    NEVER = "never"
-    USER_CONFIRMED = "user_confirmed"
-
-
-
-@dataclass(frozen=True, slots=True)
-class RetryRule:
-    """Static retry policy for one operation task type."""
-
-    policy: RetryPolicy
-    max_attempts: int
-    retryable_error_codes: frozenset[str]
-
-
-_NO_RETRY_RULE = RetryRule(
-    policy=RetryPolicy.NEVER,
-    max_attempts=1,
-    retryable_error_codes=frozenset(),
-)
-
-
-def _retry_rule(name: str) -> RetryRule:
-    return _NO_RETRY_RULE
-
 
 
 class OperationTaskRecord(BaseModel):
@@ -82,11 +54,13 @@ class OperationTaskRecord(BaseModel):
     finished_at: datetime | None
     error: dict[str, Any] | None
 
-
     @property
     def max_attempts(self) -> int:
-        return _retry_rule(self.name).max_attempts
+        return self.retry_policy.max_attempts
 
+    @property
+    def retryable_error_codes(self) -> frozenset[str]:
+        return self.retry_policy.retryable_error_codes
 
     @property
     def attempts_remaining(self) -> int:
@@ -96,13 +70,12 @@ class OperationTaskRecord(BaseModel):
     @property
     def can_retry(self) -> bool:
         error_code = self.error.get("code") if self.error is not None else None
-        rule = _retry_rule(self.name)
         return (
-            self.retry_policy == RetryPolicy.USER_CONFIRMED
+            self.retry_policy.enabled
             and self.retry_input is not None
             and self.status == OperationStatus.FAILED
-            and self.attempt < rule.max_attempts
-            and error_code in rule.retryable_error_codes
+            and self.attempt < self.max_attempts
+            and error_code in self.retryable_error_codes
         )
 
 
@@ -296,26 +269,38 @@ class Operation:
         *,
         retry_input: dict[str, Any] | None = None,
         retry_of: OperationTaskRecord | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> "OperationTask":
         """Run the root task or a child task within this operation."""
-        retry_policy = _retry_rule(str(name)).policy
-        normalized_retry_input = self._normalize_retry_input(
-            retry_input,
-            retry_policy,
-        )
         if retry_of is not None:
             if not retry_of.can_retry or retry_of.name != str(name):
                 raise OperationError(
                     self.error_code.OPERATION_TASK_NOT_RETRYABLE,
                     f"Operation task '{retry_of.task_id}' cannot be retried as '{name}'.",
                 )
+            if retry_policy is not None and retry_policy != retry_of.retry_policy:
+                raise OperationError(
+                    self.error_code.OPERATION_TASK_NOT_RETRYABLE,
+                    "A retry must use the original task's retry policy.",
+                )
+            selected_retry_policy = retry_of.retry_policy
+            if retry_input is None:
+                retry_input = retry_of.retry_input
             attempt = retry_of.attempt + 1
             retry_of_operation_id = retry_of.operation_id
             retry_of_task_id = retry_of.task_id
         else:
+            selected_retry_policy = (
+                retry_policy if retry_policy is not None else RetryPolicy()
+            )
             attempt = 1
             retry_of_operation_id = None
             retry_of_task_id = None
+
+        normalized_retry_input = self._normalize_retry_input(
+            retry_input,
+            selected_retry_policy,
+        )
 
         async with self._lock:
             if self.is_finished:
@@ -344,7 +329,7 @@ class Operation:
                     worker,
                     root=True,
                     parent_task_id=None,
-                    retry_policy=retry_policy,
+                    retry_policy=selected_retry_policy,
                     retry_input=normalized_retry_input,
                     attempt=attempt,
                     retry_of_operation_id=retry_of_operation_id,
@@ -377,7 +362,7 @@ class Operation:
                     parent_task_id=(
                         current_task[0] if current_task is not None else None
                     ),
-                    retry_policy=retry_policy,
+                    retry_policy=selected_retry_policy,
                     retry_input=normalized_retry_input,
                     attempt=attempt,
                     retry_of_operation_id=retry_of_operation_id,
@@ -403,10 +388,10 @@ class Operation:
     ) -> dict[str, Any] | None:
         if retry_input is None:
             return None
-        if retry_policy == RetryPolicy.NEVER:
+        if not retry_policy.enabled:
             raise OperationError(
                 self.error_code.OPERATION_TASK_NOT_RETRYABLE,
-                "This operation task type does not permit retry input.",
+                "This task's retry policy does not permit retry input.",
             )
         try:
             return json.loads(json.dumps(retry_input, allow_nan=False))
@@ -820,7 +805,9 @@ class Operation:
             operation_id=str(self.operation_id),
             name=task.name,
             is_root=task.is_root,
-            retry_policy=task.retry_policy.value,
+            retry_policy="user_confirmed" if task.retry_policy.enabled else "never",
+            max_attempts=task.retry_policy.max_attempts,
+            retryable_error_codes=task.retry_policy.retryable_error_codes,
             retry_input=task.retry_input,
             attempt=task.attempt,
             retry_of_operation_id=(
@@ -835,7 +822,7 @@ class Operation:
             ),
             created_at=task._created_at,
         )
-        if task.retry_policy != RetryPolicy.NEVER and task.retry_input is not None:
+        if task.retry_policy.enabled and task.retry_input is not None:
             await self._stream.sync()
 
 
@@ -977,6 +964,16 @@ class OperationTask:
     @property
     def retry_policy(self) -> RetryPolicy:
         return self._retry_policy
+
+
+    @property
+    def max_attempts(self) -> int:
+        return self._retry_policy.max_attempts
+
+
+    @property
+    def retryable_error_codes(self) -> frozenset[str]:
+        return self._retry_policy.retryable_error_codes
 
 
     @property
@@ -1208,40 +1205,73 @@ class OperationManager:
         event_replay_page_size: int | None = None,
         event_type: type[EventType] | None = None,
         error_code: type[ErrorCode] | None = None,
+        event_config: EventConfig | None = None,
+        operation_config: OperationConfig | None = None,
     ) -> None:
-        configured_event_type = event_type or EventType
-        configured_error_code = error_code or ErrorCode
-        event_defaults = EventConfig(
+        configured_event_type = (
+            event_type
+            or (event_config.event_type if event_config is not None else None)
+            or (operation_config.event_type if operation_config is not None else None)
+            or EventType
+        )
+        configured_error_code = (
+            error_code
+            or (event_config.error_code if event_config is not None else None)
+            or (operation_config.error_code if operation_config is not None else None)
+            or ErrorCode
+        )
+        event_defaults = event_config or EventConfig(
             event_type=configured_event_type,
             error_code=configured_error_code,
         )
-        self.event_config = EventConfig(
+        if (
+            event_config is not None
+            and event_type is None
+            and error_code is None
+            and event_replay_page_size is None
+        ):
+            self.event_config = event_config
+        else:
+            self.event_config = replace(
+                event_defaults,
+                event_type=configured_event_type,
+                error_code=configured_error_code,
+                replay_page_size=(
+                    event_defaults.replay_page_size
+                    if event_replay_page_size is None
+                    else event_replay_page_size
+                ),
+            )
+        operation_defaults = operation_config or OperationConfig(
             event_type=configured_event_type,
             error_code=configured_error_code,
-            replay_page_size=(
-                event_defaults.replay_page_size
-                if event_replay_page_size is None
-                else event_replay_page_size
-            ),
         )
-        operation_defaults = OperationConfig(
-            event_type=configured_event_type,
-            error_code=configured_error_code,
-        )
-        self.operation_config = OperationConfig(
-            event_type=configured_event_type,
-            error_code=configured_error_code,
-            finished_operation_cache_size=(
-                operation_defaults.finished_operation_cache_size
-                if max_cached_finished_operations is None
-                else max_cached_finished_operations
-            ),
-            sync_interval_seconds=(
-                operation_defaults.sync_interval_seconds
-                if sync_interval is None
-                else sync_interval
-            ),
-        )
+        if (
+            operation_config is not None
+            and event_type is None
+            and error_code is None
+            and max_cached_finished_operations is None
+            and sync_interval is None
+            and operation_config.event_type is configured_event_type
+            and operation_config.error_code is configured_error_code
+        ):
+            self.operation_config = operation_config
+        else:
+            self.operation_config = replace(
+                operation_defaults,
+                event_type=configured_event_type,
+                error_code=configured_error_code,
+                finished_operation_cache_size=(
+                    operation_defaults.finished_operation_cache_size
+                    if max_cached_finished_operations is None
+                    else max_cached_finished_operations
+                ),
+                sync_interval_seconds=(
+                    operation_defaults.sync_interval_seconds
+                    if sync_interval is None
+                    else sync_interval
+                ),
+            )
         self.event_type = self.event_config.event_type
         self.error_code = self.event_config.error_code
         sync_interval = self.operation_config.sync_interval_seconds

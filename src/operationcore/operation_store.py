@@ -15,9 +15,10 @@ from typing import Any, BinaryIO
 from .config import OperationConfig
 from .errors import OperationError
 from .events import Event
+from .retry import RetryPolicy
 
 
-_OPERATION_STORE_SCHEMA_VERSION = 2
+_OPERATION_STORE_SCHEMA_VERSION = 3
 
 
 
@@ -106,6 +107,8 @@ class SQLiteOperationStore:
         name: str,
         is_root: bool,
         retry_policy: str,
+        max_attempts: int,
+        retryable_error_codes: frozenset[str],
         retry_input: dict[str, Any] | None,
         attempt: int,
         retry_of_operation_id: str | None,
@@ -122,6 +125,8 @@ class SQLiteOperationStore:
                     name,
                     is_root,
                     retry_policy,
+                    max_attempts,
+                    retryable_error_codes,
                     retry_input,
                     attempt,
                     retry_of_operation_id,
@@ -554,7 +559,7 @@ class SQLiteOperationStore:
 
         try:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {0, _OPERATION_STORE_SCHEMA_VERSION}:
+            if version not in {0, 2, _OPERATION_STORE_SCHEMA_VERSION}:
                 raise OperationError(
                     self.error_code.UNSUPPORTED_OPERATION_DATABASE_VERSION,
                     "The operation database uses an unsupported schema version.",
@@ -601,6 +606,8 @@ class SQLiteOperationStore:
                     is_root INTEGER NOT NULL CHECK (is_root IN (0, 1)),
                     status TEXT NOT NULL,
                     retry_policy TEXT NOT NULL,
+                    max_attempts INTEGER NOT NULL DEFAULT 1 CHECK (max_attempts > 0),
+                    retryable_error_codes_json TEXT NOT NULL DEFAULT '[]',
                     retry_input_json TEXT,
                     attempt INTEGER NOT NULL CHECK (attempt > 0),
                     retry_of_operation_id TEXT,
@@ -630,6 +637,13 @@ class SQLiteOperationStore:
                     WHERE retry_of_task_id IS NOT NULL;
                 """
             )
+            if version == 2:
+                connection.execute(
+                    "ALTER TABLE tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 1 CHECK (max_attempts > 0)"
+                )
+                connection.execute(
+                    "ALTER TABLE tasks ADD COLUMN retryable_error_codes_json TEXT NOT NULL DEFAULT '[]'"
+                )
             connection.execute(
                 f"PRAGMA user_version = {_OPERATION_STORE_SCHEMA_VERSION}"
             )
@@ -646,6 +660,8 @@ class SQLiteOperationStore:
         name: str,
         is_root: bool,
         retry_policy: str,
+        max_attempts: int,
+        retryable_error_codes: frozenset[str],
         retry_input: dict[str, Any] | None,
         attempt: int,
         retry_of_operation_id: str | None,
@@ -657,6 +673,10 @@ class SQLiteOperationStore:
             json.dumps(retry_input, separators=(",", ":"), allow_nan=False)
             if retry_input is not None
             else None
+        )
+        retryable_error_codes_json = json.dumps(
+            sorted(retryable_error_codes),
+            separators=(",", ":"),
         )
 
         try:
@@ -670,12 +690,14 @@ class SQLiteOperationStore:
                     is_root,
                     status,
                     retry_policy,
+                    max_attempts,
+                    retryable_error_codes_json,
                     retry_input_json,
                     attempt,
                     retry_of_operation_id,
                     retry_of_task_id,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -684,6 +706,8 @@ class SQLiteOperationStore:
                     int(is_root),
                     "queued",
                     retry_policy,
+                    max_attempts,
+                    retryable_error_codes_json,
                     retry_input_json,
                     attempt,
                     retry_of_operation_id,
@@ -1046,6 +1070,8 @@ class SQLiteOperationStore:
                 is_root,
                 status,
                 retry_policy,
+                max_attempts,
+                retryable_error_codes_json,
                 retry_input_json,
                 attempt,
                 retry_of_operation_id,
@@ -1150,6 +1176,8 @@ class SQLiteOperationStore:
                 tasks.is_root,
                 tasks.status,
                 tasks.retry_policy,
+                tasks.max_attempts,
+                tasks.retryable_error_codes_json,
                 tasks.retry_input_json,
                 tasks.attempt,
                 tasks.retry_of_operation_id,
@@ -1177,6 +1205,8 @@ class SQLiteOperationStore:
                 is_root,
                 status,
                 retry_policy,
+                max_attempts,
+                retryable_error_codes_json,
                 retry_input_json,
                 attempt,
                 retry_of_operation_id,
@@ -1202,6 +1232,8 @@ class SQLiteOperationStore:
                 is_root,
                 status,
                 retry_policy,
+                max_attempts,
+                retryable_error_codes_json,
                 retry_input_json,
                 attempt,
                 retry_of_operation_id,
@@ -1317,13 +1349,20 @@ class SQLiteOperationStore:
 
     @staticmethod
     def _task_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        retryable_error_codes = frozenset(
+            json.loads(row["retryable_error_codes_json"])
+        )
+        retry_policy = RetryPolicy(
+            max_attempts=int(row["max_attempts"]),
+            retryable_error_codes=retryable_error_codes,
+        )
         return {
             "task_id": row["task_id"],
             "operation_id": row["operation_id"],
             "name": row["name"],
             "is_root": bool(row["is_root"]),
             "status": row["status"],
-            "retry_policy": row["retry_policy"],
+            "retry_policy": retry_policy,
             "retry_input": (
                 json.loads(row["retry_input_json"])
                 if row["retry_input_json"] is not None
