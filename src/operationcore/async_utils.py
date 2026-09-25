@@ -1,4 +1,4 @@
-"""Small cancellation primitives shared by Raven's durable runtime."""
+"""Small cancellation primitives shared by the operation runtime."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ _ResultT = TypeVar("_ResultT")
 async def await_completion(
     future: asyncio.Future[_ResultT],
 ) -> tuple[_ResultT, bool]:
-    """Wait for a started future and report cancellation only after it settles."""
+    """Wait for a started future and report cancellation after it settles."""
     cancellation_requested = False
     while not future.done():
         try:

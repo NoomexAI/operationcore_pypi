@@ -1,11 +1,11 @@
-"""Persistent per-operation event streams for Raven."""
+"""Event names and durable event values for the operation runtime."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,7 +14,8 @@ from .async_utils import await_completion
 from .errors import ErrorCode, OperationError
 
 if TYPE_CHECKING:
-    from .config import EventConfig
+    from .stores.protocol import OperationStore
+    from .stores.transitions import LifecycleTransition
 
 
 class EventType(str):
@@ -47,64 +48,26 @@ class Event(BaseModel):
     is_final: bool = False
 
 
-
-class EventStore(Protocol):
-    """Storage behavior required by an event stream."""
-
-    @property
-    def is_dirty(self) -> bool: ...
-
-
-    @property
-    def synced_generation(self) -> int: ...
-
-
-    async def append(self, event: Event) -> int: ...
-
-
-    async def read_after(
-        self,
-        operation_id: str,
-        after_event_id: int,
-        *,
-        limit: int | None = None,
-    ) -> list[Event]: ...
-
-
-    async def read_metadata(
-        self,
-        operation_id: str,
-    ) -> tuple[int, bool, datetime | None]: ...
-
-
-    async def checkpoint(self) -> bool: ...
-
-
-
 class EventStream:
     """The persistent event stream belonging to one operation."""
 
     def __init__(
         self,
-        operation_id: str,
-        store: EventStore,
+        operation_id: UUID,
+        store: OperationStore,
+        *,
+        error_code: type[ErrorCode] = ErrorCode,
+        replay_page_size: int = 256,
         health_check: Callable[[], None] | None = None,
-        sync_failure: Callable[[OperationError, str | None], Awaitable[None]] | None = None,
-        config: EventConfig | None = None,
+        sync_failure: Callable[[OperationError, UUID], Awaitable[None]] | None = None,
     ) -> None:
-        if config is None:
-            from .config import EventConfig
-
-            config = EventConfig()
-        self.config = config
-        self.event_type = config.event_type
-        self.error_code = config.error_code
-        self._validate_page_size(config.replay_page_size, self.error_code)
+        self._validate_page_size(replay_page_size, error_code)
         self.operation_id = operation_id
+        self.error_code = error_code
         self._store = store
         self._health_check = health_check
         self._sync_failure = sync_failure
-        self._replay_page_size = config.replay_page_size
+        self._replay_page_size = replay_page_size
         self._condition = asyncio.Condition()
         self._last_event_id = 0
         self._last_write_generation = 0
@@ -116,14 +79,19 @@ class EventStream:
         self._active_event_readers = 0
         self._cleanup_reserved = False
 
-
     @property
     def is_dirty(self) -> bool:
+        """Whether this stream has writes beyond the latest checkpoint."""
         return self._last_write_generation > self._store.synced_generation
 
-
-    async def publish(self, event: Event) -> Event:
-        """Persist an event and synchronize lifecycle boundaries immediately."""
+    async def publish(
+        self,
+        event: Event,
+        transition: LifecycleTransition | None = None,
+        *,
+        checkpoint: bool = False,
+    ) -> Event:
+        """Persist an event and then make it visible to live readers."""
         self._ensure_open()
         self._raise_if_unhealthy()
 
@@ -139,17 +107,22 @@ class EventStream:
 
             persisted = event.model_copy(
                 update={
-                    "operation_id": UUID(self.operation_id),
+                    "operation_id": self.operation_id,
                     "event_id": self._last_event_id + 1,
                 }
             )
-            commit = asyncio.create_task(self._commit(persisted))
+            commit = asyncio.create_task(
+                self._commit(
+                    persisted,
+                    transition,
+                    checkpoint=checkpoint,
+                )
+            )
             generation, cancellation_requested = await await_completion(commit)
             self._apply_persisted_event(persisted, generation)
             if cancellation_requested:
                 raise asyncio.CancelledError
             return persisted
-
 
     async def read(
         self,
@@ -170,12 +143,11 @@ class EventStream:
             await self._load()
             self._raise_if_unhealthy()
             self._validate_available_cursor(after_event_id)
-            return await self._store.read_after(
+            return await self._store.read_events(
                 self.operation_id,
                 after_event_id,
                 limit=limit,
             )
-
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
         """Yield retained events after a cursor, then wait for new events."""
@@ -198,7 +170,7 @@ class EventStream:
                 async with self._condition:
                     await self._load()
                     self._raise_if_unhealthy()
-                    events = await self._store.read_after(
+                    events = await self._store.read_events(
                         self.operation_id,
                         cursor,
                         limit=self._replay_page_size,
@@ -218,7 +190,6 @@ class EventStream:
                 self._active_event_readers -= 1
                 self._condition.notify_all()
 
-
     async def sync(self) -> bool:
         """Checkpoint pending writes to durable storage."""
         self._ensure_open()
@@ -227,14 +198,12 @@ class EventStream:
             await self._load()
             return await self._sync_locked()
 
-
     async def mark_sync_failed(self, error: OperationError) -> None:
         """Make a manager-level synchronization failure visible to readers."""
         async with self._condition:
             if self._sync_error is None:
                 self._sync_error = error
             self._condition.notify_all()
-
 
     async def close(self) -> None:
         """Checkpoint pending writes and stop live stream activity."""
@@ -246,32 +215,25 @@ class EventStream:
             self._closed = True
             self._condition.notify_all()
 
-
     async def _reserve_cleanup(self) -> bool:
         """Prevent new readers when a finished, idle stream can be removed."""
         async with self._condition:
             await self._load()
-            if (
-                self._closed
-                or not self._finished
-                or self._active_event_readers > 0
-            ):
+            if self._closed or not self._finished or self._active_event_readers > 0:
                 return False
             self._cleanup_reserved = True
             self._closed = True
             self._condition.notify_all()
             return True
 
-
     async def _release_cleanup(self) -> None:
-        """Restore a stream whose reserved database deletion failed."""
+        """Restore a stream whose reserved store deletion failed."""
         async with self._condition:
             if not self._cleanup_reserved:
                 return
             self._cleanup_reserved = False
             self._closed = False
             self._condition.notify_all()
-
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -280,13 +242,11 @@ class EventStream:
                 "Event stream is closed.",
             )
 
-
     def _raise_if_unhealthy(self) -> None:
         if self._health_check is not None:
             self._health_check()
         if self._sync_error is not None:
             raise self._sync_error
-
 
     @staticmethod
     def _validate_cursor(
@@ -298,7 +258,6 @@ class EventStream:
                 error_code.INVALID_EVENT_CURSOR,
                 "after_event_id cannot be negative.",
             )
-
 
     @staticmethod
     def _validate_page_size(
@@ -313,7 +272,6 @@ class EventStream:
                 "Event page size must be a positive integer.",
             )
 
-
     def _validate_available_cursor(self, after_event_id: int) -> None:
         if after_event_id <= self._last_event_id:
             return
@@ -321,28 +279,32 @@ class EventStream:
             self.error_code.EVENT_HISTORY_GAP,
             "The requested event cursor is ahead of the recovered event history.",
             details={
-                "operation_id": self.operation_id,
+                "operation_id": str(self.operation_id),
                 "requested_after_event_id": after_event_id,
                 "available_last_event_id": self._last_event_id,
             },
         )
 
-
     async def _load(self) -> None:
         if self._loaded:
             return
-        self._last_event_id, self._finished, self._finished_at = (
-            await self._store.read_metadata(self.operation_id)
-        )
+        state = await self._store.read_event_stream_state(self.operation_id)
+        self._last_event_id = state.last_event_id
+        self._finished = state.is_finished
+        self._finished_at = state.finished_at
         self._loaded = True
 
-
-    async def _commit(self, event: Event) -> int:
-        generation = await self._store.append(event)
-        if event.is_final or event.type in self.config.immediate_sync_event_types:
+    async def _commit(
+        self,
+        event: Event,
+        transition: LifecycleTransition | None,
+        *,
+        checkpoint: bool,
+    ) -> int:
+        generation = await self._store.append_event(event, transition)
+        if checkpoint or event.is_final:
             await self._sync_locked()
         return generation
-
 
     def _apply_persisted_event(self, event: Event, generation: int) -> None:
         self._last_write_generation = generation
@@ -351,7 +313,6 @@ class EventStream:
         if event.is_final:
             self._finished_at = event.timestamp
         self._condition.notify_all()
-
 
     async def _sync_locked(self) -> bool:
         if not self._store.is_dirty:
@@ -366,7 +327,7 @@ class EventStream:
                 and exc.code == self.error_code.OPERATION_SYNC_FAILED
                 else OperationError(
                     self.error_code.OPERATION_SYNC_FAILED,
-                    "The operation database could not be synchronized to durable storage.",
+                    "The operation store could not be synchronized to durable storage.",
                 )
             )
             self._sync_error = error

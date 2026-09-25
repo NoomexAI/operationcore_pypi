@@ -56,7 +56,6 @@ class OperationError(Exception):
         self.details = details or {}
         super().__init__(message)
 
-
     def as_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "code": self.code,
