@@ -1,69 +1,12 @@
-"""Transport-neutral Raven errors and stable error codes."""
+"""Operation runtime errors and stable error codes."""
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import Any
 
 
-class ErrorCode(StrEnum):
-    """Stable machine-readable Raven error codes."""
-
-    INVALID_KNOWLEDGE_NAME = "invalid_knowledge_name"
-    KNOWLEDGE_ALREADY_EXISTS = "knowledge_already_exists"
-    KNOWLEDGE_NOT_FOUND = "knowledge_not_found"
-    KNOWLEDGE_CLOSED = "knowledge_closed"
-    KNOWLEDGE_NOT_STARTED = "knowledge_not_started"
-    INVALID_RESOURCE_CACHE_SIZE = "invalid_resource_cache_size"
-    CONVERSATION_ALREADY_EXISTS = "conversation_already_exists"
-    CONVERSATION_NOT_FOUND = "conversation_not_found"
-    CONVERSATION_CLOSED = "conversation_closed"
-    CONVERSATION_NOT_STARTED = "conversation_not_started"
-    CONVERSATION_MEMORY_NOT_INITIALIZED = "conversation_memory_not_initialized"
-    CONTEXT_TOKEN_LIMIT_TOO_SMALL = "context_token_limit_too_small"
-    CONVERSATION_TURN_CONFLICT = "conversation_turn_conflict"
-    CONVERSATION_TURN_ACTIVE = "conversation_turn_active"
-    CONVERSATION_TURN_NOT_FOUND = "conversation_turn_not_found"
-    CONVERSATION_TURN_RESULT_MISSING = "conversation_turn_result_missing"
-    RECONSTRUCTION_EVIDENCE_NOT_FOUND = "reconstruction_evidence_not_found"
-    FOREIGN_CONVERSATION = "foreign_conversation"
-    INVALID_PREFERENCE_ID = "invalid_preference_id"
-    PREFERENCE_NOT_FOUND = "preference_not_found"
-    INVALID_CONVERSATION_ID = "invalid_conversation_id"
-    INVALID_CONVERSATION_TITLE = "invalid_conversation_title"
-    INVALID_MESSAGE_CURSOR = "invalid_message_cursor"
-    INVALID_RETRIEVAL_MODE = "invalid_retrieval_mode"
-    RETRIEVAL_MODE_NOT_ALLOWED = "retrieval_mode_not_allowed"
-    RETRIEVAL_SCORING_INVALID = "retrieval_scoring_invalid"
-    FILE_ALREADY_EXISTS = "file_already_exists"
-    FILE_NOT_FOUND = "file_not_found"
-    SECTION_NOT_FOUND = "section_not_found"
-    LLM_MODEL_REQUIRED = "llm_model_required"
-    EMBEDDING_MODEL_REQUIRED = "embedding_model_required"
-    INVALID_MODEL_SPEC = "invalid_model_spec"
-    MODEL_API_KEY_NOT_FOUND = "model_api_key_not_found"
-    MODEL_PROVIDER_FAILED = "model_provider_failed"
-    MODEL_CAPABILITY_MISSING = "model_capability_missing"
-    MODEL_RELOAD_IN_PROGRESS = "model_reload_in_progress"
-    AGENT_MAX_ITERATIONS = "agent_max_iterations"
-    INVALID_CHUNKING = "invalid_chunking"
-    NO_CHUNKS_PRODUCED = "no_chunks_produced"
-    INVALID_EMBEDDING_RESULT = "invalid_embedding_result"
-    EMBEDDING_DIMENSION_MISMATCH = "embedding_dimension_mismatch"
-    EMBEDDING_IDENTITY_MISMATCH = "embedding_identity_mismatch"
-    SOURCE_FILE_NOT_FOUND = "source_file_not_found"
-    SOURCE_FILE_CHANGED = "source_file_changed"
-    SOURCE_FILE_UNREADABLE = "source_file_unreadable"
-    SOURCE_FILE_TOO_LARGE = "source_file_too_large"
-    TRUSTED_INGESTION_DISABLED = "trusted_ingestion_disabled"
-    INGESTION_PATH_NOT_ALLOWED = "ingestion_path_not_allowed"
-    UPLOAD_RETRY_EXPIRED = "upload_retry_expired"
-    INVALID_UPLOAD_FILENAME = "invalid_upload_filename"
-    UNSUPPORTED_SOURCE_FILE = "unsupported_source_file"
-    DOCUMENT_PARSE_FAILED = "document_parse_failed"
-    NO_SECTIONS_PRODUCED = "no_sections_produced"
-    SECTION_METADATA_EXTRACTION_FAILED = "section_metadata_extraction_failed"
-    INGESTION_RECONCILIATION_FAILED = "ingestion_reconciliation_failed"
+class ErrorCode(str):
+    """Stable machine-readable errors used by the operation runtime."""
 
     INVALID_OPERATION_NAME = "invalid_operation_name"
     OPERATION_NOT_FOUND = "operation_not_found"
@@ -73,30 +16,12 @@ class ErrorCode(StrEnum):
     INVALID_OPERATION_ID = "invalid_operation_id"
     INVALID_OPERATION_STATUS = "invalid_operation_status"
     INVALID_OPERATION_PAGE_SIZE = "invalid_operation_page_size"
-    INVALID_LIST_PAGE_SIZE = "invalid_list_page_size"
     INVALID_OPERATION_CACHE_SIZE = "invalid_operation_cache_size"
     OPERATION_MANAGER_CLOSED = "operation_manager_closed"
     OPERATION_TASK_NOT_FOUND = "operation_task_not_found"
     OPERATION_TASK_NOT_RETRYABLE = "operation_task_not_retryable"
     OPERATION_TASK_ALREADY_RETRIED = "operation_task_already_retried"
     INVALID_RETRY_INPUT = "invalid_retry_input"
-
-    INVALID_METADATA = "invalid_metadata"
-    UNSUPPORTED_METADATA_VERSION = "unsupported_metadata_version"
-    PERSISTENCE_FAILED = "persistence_failed"
-    INVALID_SYSTEM_CONFIG = "invalid_system_config"
-    UNSUPPORTED_SYSTEM_CONFIG_VERSION = "unsupported_system_config_version"
-    INVALID_RUNTIME_CONFIG = "invalid_runtime_config"
-    UNSUPPORTED_RUNTIME_CONFIG_VERSION = "unsupported_runtime_config_version"
-    RUNTIME_CONFIG_CONFLICT = "runtime_config_conflict"
-    INVALID_USER_ID = "invalid_user_id"
-    AUTHENTICATION_REQUIRED = "authentication_required"
-    SERVER_ALREADY_RUNNING = "server_already_running"
-    RUNTIME_REGISTRY_CLOSED = "runtime_registry_closed"
-    RUNTIME_CAPACITY_EXCEEDED = "runtime_capacity_exceeded"
-    OPERATION_CAPACITY_EXCEEDED = "operation_capacity_exceeded"
-    REQUEST_BODY_TOO_LARGE = "request_body_too_large"
-    REQUEST_QUERY_TOO_LARGE = "request_query_too_large"
 
     EVENT_STREAM_CLOSED = "event_stream_closed"
     EVENT_STREAM_FINISHED = "event_stream_finished"
@@ -113,18 +38,15 @@ class ErrorCode(StrEnum):
     INVALID_OPERATION_SYNC_INTERVAL = "invalid_operation_sync_interval"
     INVALID_RETENTION = "invalid_retention"
     INVALID_CLEANUP_BATCH_SIZE = "invalid_cleanup_batch_size"
-
-    OLLAMA_UNAVAILABLE = "ollama_unavailable"
-    OLLAMA_OPERATION_FAILED = "ollama_operation_failed"
     INTERNAL_ERROR = "internal_error"
 
 
-class RavenError(Exception):
-    """An expected Raven error safe to expose at an application boundary."""
+class OperationError(Exception):
+    """An expected operation runtime error safe to expose at a boundary."""
 
     def __init__(
         self,
-        code: ErrorCode,
+        code: str,
         message: str,
         *,
         details: dict[str, Any] | None = None,
@@ -137,7 +59,7 @@ class RavenError(Exception):
 
     def as_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "code": self.code.value,
+            "code": self.code,
             "message": self.message,
         }
         if self.details:
@@ -145,11 +67,14 @@ class RavenError(Exception):
         return payload
 
 
-def error_payload(error: BaseException) -> dict[str, Any]:
+def error_payload(
+    error: BaseException,
+    error_code: type[ErrorCode] | None = None,
+) -> dict[str, Any]:
     """Return a safe event/API payload for an exception."""
-    if isinstance(error, RavenError):
+    if isinstance(error, OperationError):
         return error.as_payload()
     return {
-        "code": ErrorCode.INTERNAL_ERROR.value,
+        "code": (error_code or ErrorCode).INTERNAL_ERROR,
         "message": "An unexpected internal error occurred.",
     }

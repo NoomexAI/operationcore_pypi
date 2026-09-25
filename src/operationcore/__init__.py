@@ -1,5 +1,6 @@
 """Operation lifecycle and persistence primitives."""
 
+from .config import EventConfig, OperationConfig
 from .operations import (
     Operation,
     OperationCleanupResult,
@@ -8,18 +9,18 @@ from .operations import (
     OperationStatus,
     OperationTask,
     OperationTaskRecord,
-    OperationType,
     RetryPolicy,
 )
 
 __all__ = [
+    "EventConfig",
     "Operation",
     "OperationCleanupResult",
+    "OperationConfig",
     "OperationManager",
     "OperationRecord",
     "OperationStatus",
     "OperationTask",
     "OperationTaskRecord",
-    "OperationType",
     "RetryPolicy",
 ]

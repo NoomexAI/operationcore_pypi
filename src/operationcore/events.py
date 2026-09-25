@@ -5,96 +5,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timezone
-from enum import StrEnum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .async_utils import await_completion
-from .errors import ErrorCode, RavenError
+from .errors import ErrorCode, OperationError
+
+if TYPE_CHECKING:
+    from .config import EventConfig
 
 
-DEFAULT_EVENT_REPLAY_PAGE_SIZE = 256
-
-
-class EventType(StrEnum):
-    """Event names emitted by Raven components."""
-
-    CHAT_DELTA = "chat.delta"
-    CHAT_THINKING_DELTA = "chat.thinking_delta"
-    CHAT_RESPONSE_DELTA = "chat.response_delta"
-    CHAT_TOOL_CALL = "chat.tool_call"
-    CHAT_TOOL_RESULT = "chat.tool_result"
-    CHAT_MAX_ITERATIONS = "chat.max_iterations"
-    CHAT_RESULT_REUSED = "chat.result_reused"
-    CHAT_COMPLETED = "chat.completed"
-    CHAT_FAILED = "chat.failed"
-    WORK_PROGRESS = "work.progress"
-
-    INGESTION_STARTED = "ingestion.started"
-    INGESTION_PROGRESS = "ingestion.progress"
-    INGESTION_VECTORS_WRITTEN = "ingestion.vectors_written"
-    INGESTION_METADATA_COMMITTED = "ingestion.metadata_committed"
-    INGESTION_CLEANUP_STARTED = "ingestion.cleanup.started"
-    INGESTION_CLEANUP_COMPLETED = "ingestion.cleanup.completed"
-    INGESTION_CLEANUP_FAILED = "ingestion.cleanup.failed"
-    INGESTION_COMPLETED = "ingestion.completed"
-    INGESTION_FAILED = "ingestion.failed"
-
-    KNOWLEDGE_CREATE_STARTED = "knowledge.create.started"
-    KNOWLEDGE_CREATE_COMPLETED = "knowledge.create.completed"
-    KNOWLEDGE_CREATE_FAILED = "knowledge.create.failed"
-    KNOWLEDGE_DELETE_STARTED = "knowledge.delete.started"
-    KNOWLEDGE_DELETE_COMPLETED = "knowledge.delete.completed"
-    KNOWLEDGE_DELETE_FAILED = "knowledge.delete.failed"
-    KNOWLEDGE_UPDATED = "knowledge.updated"
-    KNOWLEDGE_INGEST_STARTED = "knowledge.ingest.started"
-    KNOWLEDGE_INGEST_PROGRESS = "knowledge.ingest.progress"
-    KNOWLEDGE_INGEST_COMPLETED = "knowledge.ingest.completed"
-    KNOWLEDGE_INGEST_FAILED = "knowledge.ingest.failed"
-    KNOWLEDGE_FILE_DELETE_STARTED = "knowledge.file_delete.started"
-    KNOWLEDGE_FILE_DELETE_COMPLETED = "knowledge.file_delete.completed"
-    KNOWLEDGE_FILE_DELETE_FAILED = "knowledge.file_delete.failed"
-
-    CONVERSATION_CREATE_STARTED = "conversation.create.started"
-    CONVERSATION_CREATE_COMPLETED = "conversation.create.completed"
-    CONVERSATION_CREATE_FAILED = "conversation.create.failed"
-    CONVERSATION_UPDATE_STARTED = "conversation.update.started"
-    CONVERSATION_UPDATE_COMPLETED = "conversation.update.completed"
-    CONVERSATION_UPDATE_FAILED = "conversation.update.failed"
-    CONVERSATION_DELETE_STARTED = "conversation.delete.started"
-    CONVERSATION_DELETE_COMPLETED = "conversation.delete.completed"
-    CONVERSATION_DELETE_FAILED = "conversation.delete.failed"
-    CONVERSATION_MEMORY_COMPACTION_STARTED = "conversation.memory_compaction.started"
-    CONVERSATION_MEMORY_COMPACTION_COMPLETED = "conversation.memory_compaction.completed"
-    CONVERSATION_MEMORY_COMPACTION_FAILED = "conversation.memory_compaction.failed"
-    CONVERSATION_TURN_COMMIT_STARTED = "conversation.turn_commit.started"
-    CONVERSATION_TURN_COMMITTED = "conversation.turn_commit.completed"
-    CONVERSATION_TURN_REUSED = "conversation.turn_commit.reused"
-    CONVERSATION_TURN_COMMIT_FAILED = "conversation.turn_commit.failed"
-    CONVERSATION_MEMORY_INDEX_STARTED = "conversation.memory_index.started"
-    CONVERSATION_MEMORY_INDEX_COMPLETED = "conversation.memory_index.completed"
-    CONVERSATION_MEMORY_INDEX_FAILED = "conversation.memory_index.failed"
-
-    RETRIEVAL_EMBEDDED_STARTED = "retrieval.embedded.started"
-    RETRIEVAL_EMBEDDED_COMPLETED = "retrieval.embedded.completed"
-    RETRIEVAL_EMBEDDED_FAILED = "retrieval.embedded.failed"
-    RETRIEVAL_HIERARCHICAL_STARTED = "retrieval.hierarchical.started"
-    RETRIEVAL_HIERARCHICAL_READ = "retrieval.hierarchical.read"
-    RETRIEVAL_HIERARCHICAL_COMPLETED = "retrieval.hierarchical.completed"
-    RETRIEVAL_HIERARCHICAL_FAILED = "retrieval.hierarchical.failed"
-    RETRIEVAL_AGREEMENT_STARTED = "retrieval.agreement.started"
-    RETRIEVAL_AGREEMENT_COMPLETED = "retrieval.agreement.completed"
-    RETRIEVAL_AGREEMENT_FAILED = "retrieval.agreement.failed"
-    RETRIEVAL_VECTOR_CONDITIONED_STARTED = "retrieval.vector_conditioned.started"
-    RETRIEVAL_VECTOR_CONDITIONED_COMPLETED = "retrieval.vector_conditioned.completed"
-    RETRIEVAL_VECTOR_CONDITIONED_FAILED = "retrieval.vector_conditioned.failed"
-
-    RECONSTRUCTION_STARTED = "reconstruction.started"
-    RECONSTRUCTION_FILE = "reconstruction.file"
-    RECONSTRUCTION_COMPLETED = "reconstruction.completed"
-    RECONSTRUCTION_FAILED = "reconstruction.failed"
+class EventType(str):
+    """Lifecycle events required by the operation runtime."""
 
     OPERATION_QUEUED = "operation.queued"
     OPERATION_STARTED = "operation.started"
@@ -107,57 +31,13 @@ class EventType(StrEnum):
     OPERATION_TASK_FAILED = "operation.task.failed"
     OPERATION_TASK_CANCELLED = "operation.task.cancelled"
 
-    MODEL_CONNECTION_STARTED = "model.connection.started"
-    MODEL_CONNECTION_COMPLETED = "model.connection.completed"
-    MODEL_CONNECTION_FAILED = "model.connection.failed"
-    MODEL_LIST_STARTED = "model.list.started"
-    MODEL_LIST_COMPLETED = "model.list.completed"
-    MODEL_LIST_FAILED = "model.list.failed"
-    MODEL_INSPECT_STARTED = "model.inspect.started"
-    MODEL_INSPECT_COMPLETED = "model.inspect.completed"
-    MODEL_INSPECT_FAILED = "model.inspect.failed"
-    MODEL_PULL_STARTED = "model.pull.started"
-    MODEL_PULL_PROGRESS = "model.pull.progress"
-    MODEL_PULL_COMPLETED = "model.pull.completed"
-    MODEL_PULL_FAILED = "model.pull.failed"
-    MODEL_DELETE_STARTED = "model.delete.started"
-    MODEL_DELETE_COMPLETED = "model.delete.completed"
-    MODEL_DELETE_FAILED = "model.delete.failed"
-    MODEL_LOAD_LLM_STARTED = "model.load_llm.started"
-    MODEL_LOAD_LLM_COMPLETED = "model.load_llm.completed"
-    MODEL_LOAD_LLM_FAILED = "model.load_llm.failed"
-    MODEL_LOAD_EMBEDDING_STARTED = "model.load_embedding.started"
-    MODEL_LOAD_EMBEDDING_COMPLETED = "model.load_embedding.completed"
-    MODEL_LOAD_EMBEDDING_FAILED = "model.load_embedding.failed"
-    MODEL_PRELOAD_LLM_STARTED = "model.preload_llm.started"
-    MODEL_PRELOAD_LLM_COMPLETED = "model.preload_llm.completed"
-    MODEL_PRELOAD_LLM_FAILED = "model.preload_llm.failed"
-    MODEL_PRELOAD_EMBEDDING_STARTED = "model.preload_embedding.started"
-    MODEL_PRELOAD_EMBEDDING_COMPLETED = "model.preload_embedding.completed"
-    MODEL_PRELOAD_EMBEDDING_FAILED = "model.preload_embedding.failed"
-    MODEL_UNLOAD_LLM_STARTED = "model.unload_llm.started"
-    MODEL_UNLOAD_LLM_COMPLETED = "model.unload_llm.completed"
-    MODEL_UNLOAD_LLM_FAILED = "model.unload_llm.failed"
-    MODEL_UNLOAD_EMBEDDING_STARTED = "model.unload_embedding.started"
-    MODEL_UNLOAD_EMBEDDING_COMPLETED = "model.unload_embedding.completed"
-    MODEL_UNLOAD_EMBEDDING_FAILED = "model.unload_embedding.failed"
-
-
-
-_IMMEDIATE_SYNC_EVENT_TYPES = {
-    EventType.OPERATION_QUEUED,
-    EventType.OPERATION_STARTED,
-    EventType.OPERATION_COMPLETED,
-    EventType.OPERATION_FAILED,
-    EventType.OPERATION_CANCELLED,
-}
 
 class Event(BaseModel):
     """An event stored in an operation's event stream."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    type: EventType
+    type: str
     data: dict[str, Any] = Field(default_factory=dict)
     operation_id: UUID | None = None
     task_id: UUID | None = None
@@ -209,21 +89,28 @@ class EventStream:
         operation_id: str,
         store: EventStore,
         health_check: Callable[[], None] | None = None,
-        sync_failure: Callable[[RavenError, str | None], Awaitable[None]] | None = None,
-        replay_page_size: int = DEFAULT_EVENT_REPLAY_PAGE_SIZE,
+        sync_failure: Callable[[OperationError, str | None], Awaitable[None]] | None = None,
+        config: EventConfig | None = None,
     ) -> None:
-        self._validate_page_size(replay_page_size)
+        if config is None:
+            from .config import EventConfig
+
+            config = EventConfig()
+        self.config = config
+        self.event_type = config.event_type
+        self.error_code = config.error_code
+        self._validate_page_size(config.replay_page_size, self.error_code)
         self.operation_id = operation_id
         self._store = store
         self._health_check = health_check
         self._sync_failure = sync_failure
-        self._replay_page_size = replay_page_size
+        self._replay_page_size = config.replay_page_size
         self._condition = asyncio.Condition()
         self._last_event_id = 0
         self._last_write_generation = 0
         self._finished = False
         self._finished_at: datetime | None = None
-        self._sync_error: RavenError | None = None
+        self._sync_error: OperationError | None = None
         self._loaded = False
         self._closed = False
         self._active_event_readers = 0
@@ -245,8 +132,8 @@ class EventStream:
             await self._load()
             self._raise_if_unhealthy()
             if self._finished:
-                raise RavenError(
-                    ErrorCode.EVENT_STREAM_FINISHED,
+                raise OperationError(
+                    self.error_code.EVENT_STREAM_FINISHED,
                     f"Operation '{self.operation_id}' is already finished.",
                 )
 
@@ -271,13 +158,13 @@ class EventStream:
         limit: int | None = None,
     ) -> list[Event]:
         """Read this stream's retained events after a cursor."""
-        self._validate_cursor(after_event_id)
-        self._validate_page_size(limit)
+        self._validate_cursor(after_event_id, self.error_code)
+        self._validate_page_size(limit, self.error_code)
 
         async with self._condition:
             if self._cleanup_reserved:
-                raise RavenError(
-                    ErrorCode.EVENT_STREAM_CLOSED,
+                raise OperationError(
+                    self.error_code.EVENT_STREAM_CLOSED,
                     "Event stream is being removed.",
                 )
             await self._load()
@@ -292,13 +179,13 @@ class EventStream:
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
         """Yield retained events after a cursor, then wait for new events."""
-        self._validate_cursor(after_event_id)
+        self._validate_cursor(after_event_id, self.error_code)
         cursor = after_event_id
 
         async with self._condition:
             if self._cleanup_reserved:
-                raise RavenError(
-                    ErrorCode.EVENT_STREAM_CLOSED,
+                raise OperationError(
+                    self.error_code.EVENT_STREAM_CLOSED,
                     "Event stream is being removed.",
                 )
             await self._load()
@@ -341,7 +228,7 @@ class EventStream:
             return await self._sync_locked()
 
 
-    async def mark_sync_failed(self, error: RavenError) -> None:
+    async def mark_sync_failed(self, error: OperationError) -> None:
         """Make a manager-level synchronization failure visible to readers."""
         async with self._condition:
             if self._sync_error is None:
@@ -388,8 +275,8 @@ class EventStream:
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RavenError(
-                ErrorCode.EVENT_STREAM_CLOSED,
+            raise OperationError(
+                self.error_code.EVENT_STREAM_CLOSED,
                 "Event stream is closed.",
             )
 
@@ -402,21 +289,27 @@ class EventStream:
 
 
     @staticmethod
-    def _validate_cursor(after_event_id: int) -> None:
+    def _validate_cursor(
+        after_event_id: int,
+        error_code: type[ErrorCode],
+    ) -> None:
         if after_event_id < 0:
-            raise RavenError(
-                ErrorCode.INVALID_EVENT_CURSOR,
+            raise OperationError(
+                error_code.INVALID_EVENT_CURSOR,
                 "after_event_id cannot be negative.",
             )
 
 
     @staticmethod
-    def _validate_page_size(limit: int | None) -> None:
+    def _validate_page_size(
+        limit: int | None,
+        error_code: type[ErrorCode],
+    ) -> None:
         if limit is None:
             return
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-            raise RavenError(
-                ErrorCode.INVALID_EVENT_PAGE_SIZE,
+            raise OperationError(
+                error_code.INVALID_EVENT_PAGE_SIZE,
                 "Event page size must be a positive integer.",
             )
 
@@ -424,8 +317,8 @@ class EventStream:
     def _validate_available_cursor(self, after_event_id: int) -> None:
         if after_event_id <= self._last_event_id:
             return
-        raise RavenError(
-            ErrorCode.EVENT_HISTORY_GAP,
+        raise OperationError(
+            self.error_code.EVENT_HISTORY_GAP,
             "The requested event cursor is ahead of the recovered event history.",
             details={
                 "operation_id": self.operation_id,
@@ -446,7 +339,7 @@ class EventStream:
 
     async def _commit(self, event: Event) -> int:
         generation = await self._store.append(event)
-        if event.is_final or event.type in _IMMEDIATE_SYNC_EVENT_TYPES:
+        if event.is_final or event.type in self.config.immediate_sync_event_types:
             await self._sync_locked()
         return generation
 
@@ -469,10 +362,10 @@ class EventStream:
         except Exception as exc:
             error = (
                 exc
-                if isinstance(exc, RavenError)
-                and exc.code == ErrorCode.OPERATION_SYNC_FAILED
-                else RavenError(
-                    ErrorCode.OPERATION_SYNC_FAILED,
+                if isinstance(exc, OperationError)
+                and exc.code == self.error_code.OPERATION_SYNC_FAILED
+                else OperationError(
+                    self.error_code.OPERATION_SYNC_FAILED,
                     "The operation database could not be synchronized to durable storage.",
                 )
             )

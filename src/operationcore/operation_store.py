@@ -12,31 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from .errors import ErrorCode, RavenError
-from .events import Event, EventType
+from .config import OperationConfig
+from .errors import OperationError
+from .events import Event
 
-
-_OPERATION_STATUS_BY_EVENT = {
-    EventType.OPERATION_QUEUED: "queued",
-    EventType.OPERATION_STARTED: "running",
-    EventType.OPERATION_COMPLETED: "completed",
-    EventType.OPERATION_FAILED: "failed",
-    EventType.OPERATION_CANCELLED: "cancelled",
-}
-
-_TASK_STATUS_BY_EVENT = {
-    EventType.OPERATION_TASK_QUEUED: "queued",
-    EventType.OPERATION_TASK_STARTED: "running",
-    EventType.OPERATION_TASK_COMPLETED: "completed",
-    EventType.OPERATION_TASK_FAILED: "failed",
-    EventType.OPERATION_TASK_CANCELLED: "cancelled",
-}
-
-_TERMINAL_TASK_EVENT_TYPES = {
-    EventType.OPERATION_TASK_COMPLETED,
-    EventType.OPERATION_TASK_FAILED,
-    EventType.OPERATION_TASK_CANCELLED,
-}
 
 _OPERATION_STORE_SCHEMA_VERSION = 2
 
@@ -45,8 +24,16 @@ _OPERATION_STORE_SCHEMA_VERSION = 2
 class SQLiteOperationStore:
     """Persist one user's operations, tasks, and events in SQLite."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        config: OperationConfig | None = None,
+    ) -> None:
         self.path = path
+        self.config = config or OperationConfig()
+        self.event_type = self.config.event_type
+        self.error_code = self.config.error_code
         self.ownership_path = path.with_suffix(f"{path.suffix}.lock")
         self._connection: sqlite3.Connection | None = None
         self._ownership_handle: BinaryIO | None = None
@@ -73,8 +60,8 @@ class SQLiteOperationStore:
 
     async def start(self) -> None:
         if self._closed:
-            raise RavenError(
-                ErrorCode.EVENT_STREAM_CLOSED,
+            raise OperationError(
+                self.error_code.EVENT_STREAM_CLOSED,
                 "Operation database is closed.",
             )
         if self._connection is not None:
@@ -85,11 +72,11 @@ class SQLiteOperationStore:
                 return
             try:
                 await self._run_in_store_thread(self._open_connection)
-            except RavenError:
+            except OperationError:
                 raise
             except Exception as exc:
-                raise RavenError(
-                    ErrorCode.OPERATION_DATABASE_FAILED,
+                raise OperationError(
+                    self.error_code.OPERATION_DATABASE_FAILED,
                     "The operation database could not be opened.",
                 ) from exc
 
@@ -99,11 +86,11 @@ class SQLiteOperationStore:
         async with self._lock:
             try:
                 await self._run_in_store_thread(self._append, event)
-            except RavenError:
+            except OperationError:
                 raise
             except Exception as exc:
-                raise RavenError(
-                    ErrorCode.OPERATION_DATABASE_FAILED,
+                raise OperationError(
+                    self.error_code.OPERATION_DATABASE_FAILED,
                     "The event could not be persisted.",
                     details={"operation_id": str(event.operation_id)},
                 ) from exc
@@ -141,7 +128,7 @@ class SQLiteOperationStore:
                     retry_of_task_id,
                     created_at.isoformat(),
                 )
-            except RavenError:
+            except OperationError:
                 raise
             except Exception as exc:
                 raise self._database_error("The operation task could not be persisted.") from exc
@@ -164,8 +151,8 @@ class SQLiteOperationStore:
         try:
             return self._operation_from_row(row)
         except Exception as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_CORRUPTED,
                 "The operation database contains an invalid operation record.",
                 details={"operation_id": operation_id},
             ) from exc
@@ -192,8 +179,8 @@ class SQLiteOperationStore:
         try:
             return [self._operation_from_row(row) for row in rows]
         except Exception as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_CORRUPTED,
                 "The operation database contains an invalid operation record.",
             ) from exc
 
@@ -210,8 +197,8 @@ class SQLiteOperationStore:
         try:
             return self._task_from_row(row)
         except Exception as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_CORRUPTED,
                 "The operation database contains an invalid task record.",
                 details={"task_id": task_id},
             ) from exc
@@ -240,8 +227,8 @@ class SQLiteOperationStore:
         try:
             return self._event_from_row(row)
         except Exception as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_CORRUPTED,
                 "The operation database contains an invalid task terminal event.",
                 details={
                     "operation_id": operation_id,
@@ -275,8 +262,8 @@ class SQLiteOperationStore:
         try:
             return [self._task_from_row(row) for row in rows]
         except Exception as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_CORRUPTED,
                 "The operation database contains an invalid task record.",
             ) from exc
 
@@ -294,8 +281,8 @@ class SQLiteOperationStore:
         try:
             return self._task_from_row(row)
         except Exception as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_CORRUPTED,
                 "The operation database contains an invalid retry task record.",
                 details={"retry_of_task_id": task_id},
             ) from exc
@@ -314,8 +301,8 @@ class SQLiteOperationStore:
         try:
             return [self._task_from_row(row) for row in rows]
         except Exception as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_CORRUPTED,
                 "The operation database contains an invalid task record.",
                 details={"operation_id": operation_id},
             ) from exc
@@ -355,8 +342,8 @@ class SQLiteOperationStore:
         if limit is not None and (
             isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
         ):
-            raise RavenError(
-                ErrorCode.INVALID_EVENT_PAGE_SIZE,
+            raise OperationError(
+                self.error_code.INVALID_EVENT_PAGE_SIZE,
                 "Event page size must be a positive integer.",
             )
 
@@ -375,8 +362,8 @@ class SQLiteOperationStore:
         try:
             return [self._event_from_row(row) for row in rows]
         except Exception as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_CORRUPTED,
                 "The operation database contains an invalid event record.",
                 details={"operation_id": operation_id},
             ) from exc
@@ -442,8 +429,8 @@ class SQLiteOperationStore:
             try:
                 await self._run_in_store_thread(self._checkpoint)
             except Exception as exc:
-                raise RavenError(
-                    ErrorCode.OPERATION_SYNC_FAILED,
+                raise OperationError(
+                    self.error_code.OPERATION_SYNC_FAILED,
                     "The operation database could not be synchronized to durable storage.",
                 ) from exc
             self._synced_generation = self._write_generation
@@ -507,8 +494,8 @@ class SQLiteOperationStore:
             self._lock_ownership_file(handle)
         except OSError as exc:
             handle.close()
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_IN_USE,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_IN_USE,
                 "The operation database is already owned by another Raven runtime.",
             ) from exc
         except BaseException:
@@ -568,8 +555,8 @@ class SQLiteOperationStore:
         try:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version not in {0, _OPERATION_STORE_SCHEMA_VERSION}:
-                raise RavenError(
-                    ErrorCode.UNSUPPORTED_OPERATION_DATABASE_VERSION,
+                raise OperationError(
+                    self.error_code.UNSUPPORTED_OPERATION_DATABASE_VERSION,
                     "The operation database uses an unsupported schema version.",
                     details={"schema_version": version},
                 )
@@ -719,8 +706,8 @@ class SQLiteOperationStore:
                             "existing_status": str(existing["status"]),
                         }
                     )
-                raise RavenError(
-                    ErrorCode.OPERATION_TASK_ALREADY_RETRIED,
+                raise OperationError(
+                    self.error_code.OPERATION_TASK_ALREADY_RETRIED,
                     f"Operation task '{retry_of_task_id}' already has a retry.",
                     details=details,
                 ) from exc
@@ -733,8 +720,8 @@ class SQLiteOperationStore:
 
     def _append(self, event: Event) -> None:
         if event.operation_id is None or event.event_id is None:
-            raise RavenError(
-                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+            raise OperationError(
+                self.error_code.OPERATION_DATABASE_CORRUPTED,
                 "A persisted event requires operation_id and event_id.",
             )
 
@@ -744,7 +731,7 @@ class SQLiteOperationStore:
         timestamp = str(serialized["timestamp"])
         event_name = event.data.get("name")
         name = event_name if isinstance(event_name, str) else ""
-        status = _OPERATION_STATUS_BY_EVENT.get(event.type)
+        status = self.config.operation_status_by_event.get(event.type)
 
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -765,8 +752,8 @@ class SQLiteOperationStore:
 
             if existing is None:
                 if event.event_id != 1:
-                    raise RavenError(
-                        ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                    raise OperationError(
+                        self.error_code.OPERATION_DATABASE_CORRUPTED,
                         "The first persisted event must have event_id 1.",
                         details={"operation_id": operation_id},
                     )
@@ -789,21 +776,21 @@ class SQLiteOperationStore:
                         status or "running",
                         event.event_id,
                         timestamp,
-                        timestamp if event.type == EventType.OPERATION_STARTED else None,
+                        timestamp if event.type == self.event_type.OPERATION_STARTED else None,
                         timestamp if event.is_final else None,
                         int(event.is_final),
                     ),
                 )
             else:
                 if bool(existing["is_finished"]):
-                    raise RavenError(
-                        ErrorCode.EVENT_STREAM_FINISHED,
+                    raise OperationError(
+                        self.error_code.EVENT_STREAM_FINISHED,
                         f"Operation '{operation_id}' is already finished.",
                     )
                 expected_event_id = int(existing["last_event_id"]) + 1
                 if event.event_id != expected_event_id:
-                    raise RavenError(
-                        ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                    raise OperationError(
+                        self.error_code.OPERATION_DATABASE_CORRUPTED,
                         "Event IDs must be contiguous within an operation.",
                         details={
                             "operation_id": operation_id,
@@ -833,7 +820,7 @@ class SQLiteOperationStore:
                         event.event_id,
                         (
                             timestamp
-                            if event.type == EventType.OPERATION_STARTED
+                            if event.type == self.event_type.OPERATION_STARTED
                             else existing["started_at"]
                         ),
                         timestamp if event.is_final else existing["finished_at"],
@@ -842,7 +829,7 @@ class SQLiteOperationStore:
                     ),
                 )
 
-            task_status = _TASK_STATUS_BY_EVENT.get(event.type)
+            task_status = self.config.task_status_by_event.get(event.type)
             if event.task_id is not None and task_status is not None:
                 task_error = event.data.get("error")
                 error_json = (
@@ -861,16 +848,18 @@ class SQLiteOperationStore:
                     """,
                     (
                         task_status,
-                        timestamp if event.type == EventType.OPERATION_TASK_STARTED else None,
-                        timestamp if event.type in _TERMINAL_TASK_EVENT_TYPES else None,
+                        timestamp if event.type == self.event_type.OPERATION_TASK_STARTED else None,
+                        timestamp
+                        if event.type in self.config.terminal_task_event_types
+                        else None,
                         error_json,
                         str(event.task_id),
                         operation_id,
                     ),
                 )
                 if cursor.rowcount != 1:
-                    raise RavenError(
-                        ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                    raise OperationError(
+                        self.error_code.OPERATION_DATABASE_CORRUPTED,
                         "A task lifecycle event references an unknown operation task.",
                         details={
                             "operation_id": operation_id,
@@ -894,7 +883,7 @@ class SQLiteOperationStore:
                 (
                     operation_id,
                     event.event_id,
-                    event.type.value,
+                    event.type,
                     timestamp,
                     serialized["task_id"],
                     event.task_name,
@@ -1077,9 +1066,7 @@ class SQLiteOperationStore:
         operation_id: str,
         task_id: str,
     ) -> sqlite3.Row | None:
-        terminal_types = tuple(
-            event_type.value for event_type in _TERMINAL_TASK_EVENT_TYPES
-        )
+        terminal_types = tuple(self.config.terminal_task_event_types)
         return self._require_connection().execute(
             """
             SELECT
@@ -1304,9 +1291,8 @@ class SQLiteOperationStore:
         )
 
 
-    @staticmethod
-    def _operation_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        if row["initial_event_type"] != EventType.OPERATION_QUEUED.value:
+    def _operation_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        if row["initial_event_type"] != self.event_type.OPERATION_QUEUED:
             raise ValueError("operation history does not start with operation.queued")
         initial_data = json.loads(row["initial_data_json"])
         if initial_data.get("name") != row["name"]:
@@ -1357,6 +1343,8 @@ class SQLiteOperationStore:
         }
 
 
-    @staticmethod
-    def _database_error(message: str) -> RavenError:
-        return RavenError(ErrorCode.OPERATION_DATABASE_FAILED, message)
+    def _database_error(self, message: str) -> OperationError:
+        return OperationError(
+            self.error_code.OPERATION_DATABASE_FAILED,
+            message,
+        )

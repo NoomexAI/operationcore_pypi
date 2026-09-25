@@ -19,21 +19,10 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from .async_utils import await_completion
-from .errors import ErrorCode, RavenError, error_payload
-from .events import (
-    DEFAULT_EVENT_REPLAY_PAGE_SIZE,
-    Event,
-    EventStream,
-    EventType,
-)
+from .config import EventConfig, OperationConfig
+from .errors import ErrorCode, OperationError, error_payload
+from .events import Event, EventStream, EventType
 from .operation_store import SQLiteOperationStore
-
-
-DEFAULT_FINISHED_OPERATION_CACHE_SIZE = 256
-DEFAULT_OPERATION_CLEANUP_BATCH_SIZE = 100
-DEFAULT_OPERATION_PAGE_SIZE = 50
-OPERATION_SYNC_INTERVAL_SECONDS = 1.0
-
 
 
 class OperationStatus(StrEnum):
@@ -42,65 +31,6 @@ class OperationStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
-
-
-
-class OperationType(StrEnum):
-    """Stable names for operations provided by Raven's built-in components."""
-
-    RAVEN_CONFIGURE_MODELS = "nraven.configure_models"
-    RUNTIME_SETTINGS_UPDATE = "runtime.settings.update"
-    RUNTIME_SETTINGS_RESET = "runtime.settings.reset"
-
-    MODEL_CHECK_CONNECTION = "model.check_connection"
-    MODEL_LIST = "model.list"
-    MODEL_INSPECT = "model.inspect"
-    MODEL_PULL = "model.pull"
-    MODEL_DELETE = "model.delete"
-    MODEL_LOAD_LLM = "model.load_llm"
-    MODEL_LOAD_EMBEDDING = "model.load_embedding"
-    MODEL_PRELOAD_LLM = "model.preload_llm"
-    MODEL_PRELOAD_EMBEDDING = "model.preload_embedding"
-    MODEL_UNLOAD_LLM = "model.unload_llm"
-    MODEL_UNLOAD_EMBEDDING = "model.unload_embedding"
-
-    KNOWLEDGE_SET_SUMMARY = "knowledge.set_summary"
-    KNOWLEDGE_INGEST = "knowledge.ingest"
-    KNOWLEDGE_DELETE_FILE = "knowledge.delete_file"
-    KNOWLEDGE_CREATE = "knowledge.create"
-    KNOWLEDGE_DELETE = "knowledge.delete"
-
-    INGESTION_RUN = "ingestion.run"
-    INGESTION_CLEANUP = "ingestion.cleanup"
-
-    RETRIEVAL_EMBEDDED_LOCAL = "retrieval.embedded.local"
-    RETRIEVAL_EMBEDDED_GLOBAL = "retrieval.embedded.global"
-    RETRIEVAL_HIERARCHICAL_LOCAL = "retrieval.hierarchical.local"
-    RETRIEVAL_HIERARCHICAL_GLOBAL = "retrieval.hierarchical.global"
-    RETRIEVAL_HIERARCHICAL_BY_KNOWLEDGE = "retrieval.hierarchical.by_knowledge"
-    RETRIEVAL_HIERARCHICAL_BY_FILE = "retrieval.hierarchical.by_file"
-    RETRIEVAL_AGREEMENT_LOCAL = "retrieval.agreement.local"
-    RETRIEVAL_AGREEMENT_GLOBAL = "retrieval.agreement.global"
-    RETRIEVAL_VECTOR_CONDITIONED_LOCAL = "retrieval.vector_conditioned.local"
-    RETRIEVAL_VECTOR_CONDITIONED_GLOBAL = "retrieval.vector_conditioned.global"
-
-    RECONSTRUCTION_RECONSTRUCT = "reconstruction.reconstruct"
-    RECONSTRUCTION_FROM_TURN = "reconstruction.from_turn"
-
-    CONVERSATION_SAVE_PREFERENCE = "conversation.save_preference"
-    CONVERSATION_REMOVE_PREFERENCE = "conversation.remove_preference"
-    CONVERSATION_UPDATE = "conversation.update"
-    CONVERSATION_GENERATE_TITLE = "conversation.generate_title"
-    CONVERSATION_GET_CONTEXT = "conversation.get_context"
-    CONVERSATION_APPEND_TURN = "conversation.append_turn"
-    CONVERSATION_RECONCILE_TURN = "conversation.reconcile_turn"
-    CONVERSATION_CREATE = "conversation.create"
-    CONVERSATION_UPDATE_METADATA = "conversation.update_metadata"
-    CONVERSATION_DELETE = "conversation.delete"
-
-    CHAT_GENERATE_RESPONSE = "chat.generate_response"
-    SESSION_GENERATE_RESPONSE = "session.generate_response"
-
 
 
 class RetryPolicy(StrEnum):
@@ -120,58 +50,6 @@ class RetryRule:
     retryable_error_codes: frozenset[str]
 
 
-
-
-_COMMON_RETRYABLE_ERRORS = frozenset(
-    {
-        ErrorCode.OPERATION_INTERRUPTED.value,
-        ErrorCode.INTERNAL_ERROR.value,
-        ErrorCode.OPERATION_SYNC_FAILED.value,
-        ErrorCode.OPERATION_DATABASE_FAILED.value,
-        ErrorCode.MODEL_PROVIDER_FAILED.value,
-        ErrorCode.OLLAMA_UNAVAILABLE.value,
-        ErrorCode.OLLAMA_OPERATION_FAILED.value,
-    }
-)
-
-_RETRY_RULES = {
-    OperationType.INGESTION_RUN.value: RetryRule(
-        policy=RetryPolicy.USER_CONFIRMED,
-        max_attempts=3,
-        retryable_error_codes=_COMMON_RETRYABLE_ERRORS
-        | {
-            ErrorCode.SOURCE_FILE_NOT_FOUND.value,
-            ErrorCode.SOURCE_FILE_CHANGED.value,
-            ErrorCode.SOURCE_FILE_UNREADABLE.value,
-            ErrorCode.DOCUMENT_PARSE_FAILED.value,
-            ErrorCode.NO_SECTIONS_PRODUCED.value,
-            ErrorCode.SECTION_METADATA_EXTRACTION_FAILED.value,
-            ErrorCode.INVALID_EMBEDDING_RESULT.value,
-            ErrorCode.EMBEDDING_DIMENSION_MISMATCH.value,
-            ErrorCode.INGESTION_RECONCILIATION_FAILED.value,
-            ErrorCode.PERSISTENCE_FAILED.value,
-        },
-    ),
-    OperationType.RECONSTRUCTION_RECONSTRUCT.value: RetryRule(
-        policy=RetryPolicy.USER_CONFIRMED,
-        max_attempts=3,
-        retryable_error_codes=_COMMON_RETRYABLE_ERRORS
-        | {
-            ErrorCode.KNOWLEDGE_NOT_FOUND.value,
-            ErrorCode.FILE_NOT_FOUND.value,
-            ErrorCode.SECTION_NOT_FOUND.value,
-        },
-    ),
-    OperationType.SESSION_GENERATE_RESPONSE.value: RetryRule(
-        policy=RetryPolicy.USER_CONFIRMED,
-        max_attempts=3,
-        retryable_error_codes=_COMMON_RETRYABLE_ERRORS
-        | {
-            ErrorCode.PERSISTENCE_FAILED.value,
-        },
-    ),
-}
-
 _NO_RETRY_RULE = RetryRule(
     policy=RetryPolicy.NEVER,
     max_attempts=1,
@@ -180,8 +58,7 @@ _NO_RETRY_RULE = RetryRule(
 
 
 def _retry_rule(name: str) -> RetryRule:
-    return _RETRY_RULES.get(name, _NO_RETRY_RULE)
-
+    return _NO_RETRY_RULE
 
 
 
@@ -247,7 +124,11 @@ class OperationRecord(BaseModel):
 
     @property
     def is_finished(self) -> bool:
-        return self.status in _TERMINAL_STATUSES
+        return self.status in (
+            OperationStatus.COMPLETED,
+            OperationStatus.FAILED,
+            OperationStatus.CANCELLED,
+        )
 
 
 
@@ -263,20 +144,6 @@ class OperationCleanupResult(BaseModel):
 
 OperationWorker = Callable[["Operation"], Awaitable[Any]]
 TaskWorker = Callable[["Operation"], Awaitable[Any]]
-_TERMINAL_STATUSES = frozenset(
-    {
-        OperationStatus.COMPLETED,
-        OperationStatus.FAILED,
-        OperationStatus.CANCELLED,
-    }
-)
-_TERMINAL_TASK_EVENT_TYPES = frozenset(
-    {
-        EventType.OPERATION_TASK_COMPLETED,
-        EventType.OPERATION_TASK_FAILED,
-        EventType.OPERATION_TASK_CANCELLED,
-    }
-)
 _CURRENT_TASK: ContextVar[tuple[UUID, str] | None] = ContextVar(
     "nraven_current_operation_task",
     default=None,
@@ -301,6 +168,9 @@ class Operation:
         self.name = name
         self._stream = stream
         self._store = store
+        self.config = store.config
+        self.event_type = stream.event_type
+        self.error_code = stream.error_code
         self._created_at = created_at or datetime.now(timezone.utc)
         self._started_at: datetime | None = None
         self._finished_at: datetime | None = None
@@ -353,7 +223,7 @@ class Operation:
 
     @property
     def is_finished(self) -> bool:
-        return self._status in _TERMINAL_STATUSES
+        return self._status.value in self.config.terminal_statuses
 
 
     @property
@@ -366,8 +236,8 @@ class Operation:
         parsed_id = self._parse_task_id(task_id)
         record = await self._store.read_task(str(parsed_id))
         if record is None or str(record.get("operation_id")) != str(self.operation_id):
-            raise RavenError(
-                ErrorCode.OPERATION_TASK_NOT_FOUND,
+            raise OperationError(
+                self.error_code.OPERATION_TASK_NOT_FOUND,
                 f"Operation task '{parsed_id}' was not found in operation "
                 f"'{self.operation_id}'.",
             )
@@ -390,7 +260,7 @@ class Operation:
         self,
         *,
         status: OperationStatus | str | None = None,
-        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        limit: int | None = None,
         after_task_id: UUID | str | None = None,
     ) -> list[OperationTaskRecord]:
         """List this operation's durable tasks in newest-first order."""
@@ -403,11 +273,12 @@ class Operation:
                 cursor is None
                 or str(cursor.get("operation_id")) != str(self.operation_id)
             ):
-                raise RavenError(
-                    ErrorCode.OPERATION_TASK_NOT_FOUND,
+                raise OperationError(
+                    self.error_code.OPERATION_TASK_NOT_FOUND,
                     f"Operation task '{parsed_cursor}' was not found in operation "
                     f"'{self.operation_id}'.",
                 )
+        limit = self.config.page_size if limit is None else limit
         self._validate_page_size(limit)
         records = await self._store.list_tasks(
             operation_id=str(self.operation_id),
@@ -434,8 +305,8 @@ class Operation:
         )
         if retry_of is not None:
             if not retry_of.can_retry or retry_of.name != str(name):
-                raise RavenError(
-                    ErrorCode.OPERATION_TASK_NOT_RETRYABLE,
+                raise OperationError(
+                    self.error_code.OPERATION_TASK_NOT_RETRYABLE,
                     f"Operation task '{retry_of.task_id}' cannot be retried as '{name}'.",
                 )
             attempt = retry_of.attempt + 1
@@ -448,8 +319,8 @@ class Operation:
 
         async with self._lock:
             if self.is_finished:
-                raise RavenError(
-                    ErrorCode.OPERATION_FINISHED,
+                raise OperationError(
+                    self.error_code.OPERATION_FINISHED,
                     f"Operation '{self.operation_id}' is already finished.",
                 )
             if self._cancellation_requested:
@@ -458,8 +329,8 @@ class Operation:
             is_root = self._task is None
             if is_root:
                 if name != self.name:
-                    raise RavenError(
-                        ErrorCode.INVALID_OPERATION_NAME,
+                    raise OperationError(
+                        self.error_code.INVALID_OPERATION_NAME,
                         "The root task name must match the operation name.",
                         details={
                             "operation_name": self.name,
@@ -492,20 +363,19 @@ class Operation:
 
             else:
                 if self._status != OperationStatus.RUNNING:
-                    raise RavenError(
-                        ErrorCode.OPERATION_FINISHED,
+                    raise OperationError(
+                        self.error_code.OPERATION_FINISHED,
                         f"Operation '{self.operation_id}' is not accepting child tasks.",
                     )
 
+                current_task = _CURRENT_TASK.get()
                 task = OperationTask(
                     self,
                     name,
                     worker,
                     root=False,
                     parent_task_id=(
-                        _CURRENT_TASK.get()[0]
-                        if _CURRENT_TASK.get() is not None
-                        else None
+                        current_task[0] if current_task is not None else None
                     ),
                     retry_policy=retry_policy,
                     retry_input=normalized_retry_input,
@@ -526,23 +396,23 @@ class Operation:
         raise asyncio.CancelledError
 
 
-    @staticmethod
     def _normalize_retry_input(
+        self,
         retry_input: dict[str, Any] | None,
         retry_policy: RetryPolicy,
     ) -> dict[str, Any] | None:
         if retry_input is None:
             return None
         if retry_policy == RetryPolicy.NEVER:
-            raise RavenError(
-                ErrorCode.OPERATION_TASK_NOT_RETRYABLE,
+            raise OperationError(
+                self.error_code.OPERATION_TASK_NOT_RETRYABLE,
                 "This operation task type does not permit retry input.",
             )
         try:
             return json.loads(json.dumps(retry_input, allow_nan=False))
         except (TypeError, ValueError) as exc:
-            raise RavenError(
-                ErrorCode.INVALID_RETRY_INPUT,
+            raise OperationError(
+                self.error_code.INVALID_RETRY_INPUT,
                 "Retry input must be JSON serializable.",
             ) from exc
 
@@ -692,8 +562,8 @@ class Operation:
         if failed is not None:
             if failed.error is not None:
                 raise failed.error
-            raise RavenError(
-                ErrorCode.INTERNAL_ERROR,
+            raise OperationError(
+                self.error_code.INTERNAL_ERROR,
                 f"Operation task '{failed.task_id}' failed.",
             )
 
@@ -725,7 +595,7 @@ class Operation:
         self._status = OperationStatus.FAILED
         self._finished_at = datetime.now(timezone.utc)
         self._result = None
-        self._error = error_payload(error)
+        self._error = error_payload(error, self.error_code)
         self._terminal_exception = error
 
 
@@ -738,7 +608,7 @@ class Operation:
 
         await self._stream.publish(
             Event(
-                type=EventType.OPERATION_STARTED,
+                type=self.event_type.OPERATION_STARTED,
                 data={"name": self.name},
             )
         )
@@ -747,7 +617,7 @@ class Operation:
     async def _persist_queued(self) -> None:
         await self._stream.publish(
             Event(
-                type=EventType.OPERATION_QUEUED,
+                type=self.event_type.OPERATION_QUEUED,
                 data={"name": self.name},
             )
         )
@@ -756,7 +626,7 @@ class Operation:
     async def _finish_completed(self, result: Any) -> None:
         await self._finish(
             status=OperationStatus.COMPLETED,
-            event_type=EventType.OPERATION_COMPLETED,
+            event_type=self.event_type.OPERATION_COMPLETED,
             result=result,
         )
 
@@ -764,8 +634,8 @@ class Operation:
     async def _finish_failed(self, error: BaseException) -> None:
         await self._finish(
             status=OperationStatus.FAILED,
-            event_type=EventType.OPERATION_FAILED,
-            error=error_payload(error),
+            event_type=self.event_type.OPERATION_FAILED,
+            error=error_payload(error, self.error_code),
         )
         self._terminal_exception = error
 
@@ -773,7 +643,7 @@ class Operation:
     async def _finish_cancelled(self) -> None:
         await self._finish(
             status=OperationStatus.CANCELLED,
-            event_type=EventType.OPERATION_CANCELLED,
+            event_type=self.event_type.OPERATION_CANCELLED,
         )
 
 
@@ -786,13 +656,13 @@ class Operation:
                 raise RuntimeError("an active operation cannot be recovered as interrupted")
             previous_status = self._status
 
-        interruption = RavenError(
-            ErrorCode.OPERATION_INTERRUPTED,
+        interruption = OperationError(
+            self.error_code.OPERATION_INTERRUPTED,
             "The operation was interrupted by a previous process termination.",
         )
         await self._finish(
             status=OperationStatus.FAILED,
-            event_type=EventType.OPERATION_FAILED,
+            event_type=self.event_type.OPERATION_FAILED,
             error=interruption.as_payload(),
             event_data={
                 "previous_status": previous_status.value,
@@ -805,14 +675,14 @@ class Operation:
     async def _recover_interrupted_tasks(self) -> None:
         """Finalize persisted non-terminal tasks owned by this operation."""
         records = await self._store.unfinished_tasks(str(self.operation_id))
-        interruption = RavenError(
-            ErrorCode.OPERATION_INTERRUPTED,
+        interruption = OperationError(
+            self.error_code.OPERATION_INTERRUPTED,
             "The operation task was interrupted by a previous process termination.",
         )
         for record in records:
             await self.publish(
                 Event(
-                    type=EventType.OPERATION_TASK_FAILED,
+                    type=self.event_type.OPERATION_TASK_FAILED,
                     task_id=UUID(str(record["task_id"])),
                     task_name=str(record["name"]),
                     data={
@@ -829,7 +699,7 @@ class Operation:
         self,
         *,
         status: OperationStatus,
-        event_type: EventType,
+        event_type: str,
         result: Any = None,
         error: dict[str, Any] | None = None,
         event_data: dict[str, Any] | None = None,
@@ -865,13 +735,17 @@ class Operation:
     ) -> "Operation":
         """Reconstruct a root operation from its persisted event history."""
         if not events:
-            raise RavenError(
-                ErrorCode.OPERATION_NOT_FOUND,
+            raise OperationError(
+                stream.error_code.OPERATION_NOT_FOUND,
                 f"Operation '{operation_id}' has no persisted events.",
             )
 
         queued = next(
-            (event for event in events if event.type == EventType.OPERATION_QUEUED),
+            (
+                event
+                for event in events
+                if event.type == stream.event_type.OPERATION_QUEUED
+            ),
             None,
         )
         name = queued.data.get("name") if queued else None
@@ -965,19 +839,18 @@ class Operation:
             await self._stream.sync()
 
 
-    @staticmethod
-    def _parse_task_id(task_id: UUID | str) -> UUID:
+    def _parse_task_id(self, task_id: UUID | str) -> UUID:
         try:
             return task_id if isinstance(task_id, UUID) else UUID(task_id)
         except (TypeError, ValueError) as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_TASK_NOT_FOUND,
+            raise OperationError(
+                self.error_code.OPERATION_TASK_NOT_FOUND,
                 "task_id must be a valid UUID.",
             ) from exc
 
 
-    @staticmethod
     def _parse_status(
+        self,
         status: OperationStatus | str | None,
     ) -> OperationStatus | None:
         if status is None or isinstance(status, OperationStatus):
@@ -985,24 +858,23 @@ class Operation:
         try:
             return OperationStatus(status)
         except (TypeError, ValueError) as exc:
-            raise RavenError(
-                ErrorCode.INVALID_OPERATION_STATUS,
+            raise OperationError(
+                self.error_code.INVALID_OPERATION_STATUS,
                 f"Unknown operation status '{status}'.",
             ) from exc
 
 
-    @staticmethod
-    def _validate_page_size(limit: int) -> None:
+    def _validate_page_size(self, limit: int) -> None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-            raise RavenError(
-                ErrorCode.INVALID_OPERATION_PAGE_SIZE,
+            raise OperationError(
+                self.error_code.INVALID_OPERATION_PAGE_SIZE,
                 "Operation page size must be a positive integer.",
             )
 
 
     def _restore(self, events: list[Event]) -> None:
         started = next(
-            (event for event in events if event.type == EventType.OPERATION_STARTED),
+            (event for event in events if event.type == self.event_type.OPERATION_STARTED),
             None,
         )
         final = next((event for event in events if event.is_final), None)
@@ -1013,13 +885,13 @@ class Operation:
             return
 
         self._finished_at = final.timestamp
-        if final.type == EventType.OPERATION_COMPLETED:
+        if final.type == self.event_type.OPERATION_COMPLETED:
             self._status = OperationStatus.COMPLETED
-        elif final.type == EventType.OPERATION_FAILED:
+        elif final.type == self.event_type.OPERATION_FAILED:
             self._status = OperationStatus.FAILED
             error = final.data.get("error")
             self._error = error if isinstance(error, dict) else None
-        elif final.type == EventType.OPERATION_CANCELLED:
+        elif final.type == self.event_type.OPERATION_CANCELLED:
             self._status = OperationStatus.CANCELLED
 
 
@@ -1084,7 +956,7 @@ class OperationTask:
 
     @property
     def is_finished(self) -> bool:
-        return self._status in _TERMINAL_STATUSES
+        return self._status.value in self.operation.config.terminal_statuses
 
 
     @property
@@ -1140,7 +1012,7 @@ class OperationTask:
         if self._task is not None:
             raise RuntimeError(f"task '{self.task_id}' has already started")
         cancellation_requested = await self._publish_lifecycle(
-            EventType.OPERATION_TASK_QUEUED
+            self.operation.event_type.OPERATION_TASK_QUEUED
         )
         if cancellation_requested:
             await self._finalize_cancelled()
@@ -1153,7 +1025,7 @@ class OperationTask:
 
     async def _run_root(self, operation: Operation) -> Any:
         cancellation_requested = await self._publish_lifecycle(
-            EventType.OPERATION_TASK_QUEUED
+            self.operation.event_type.OPERATION_TASK_QUEUED
         )
         if cancellation_requested:
             await self._finalize_cancelled()
@@ -1167,7 +1039,7 @@ class OperationTask:
         )
         try:
             cancellation_requested = await self._publish_lifecycle(
-                EventType.OPERATION_TASK_STARTED
+                self.operation.event_type.OPERATION_TASK_STARTED
             )
             self._status = OperationStatus.RUNNING
             if cancellation_requested:
@@ -1175,7 +1047,7 @@ class OperationTask:
             self.operation.raise_if_cancelled()
             result = await self._worker(self.operation)
             cancellation_requested = await self._publish_lifecycle(
-                EventType.OPERATION_TASK_COMPLETED
+                self.operation.event_type.OPERATION_TASK_COMPLETED
             )
             self._result = result
             self._status = OperationStatus.COMPLETED
@@ -1191,8 +1063,8 @@ class OperationTask:
             cancellation_requested = False
             try:
                 cancellation_requested = await self._publish_lifecycle(
-                    EventType.OPERATION_TASK_FAILED,
-                    {"error": error_payload(exc)},
+                    self.operation.event_type.OPERATION_TASK_FAILED,
+                    {"error": error_payload(exc, self.operation.error_code)},
                 )
             finally:
                 self._status = OperationStatus.FAILED
@@ -1214,8 +1086,8 @@ class OperationTask:
             await asyncio.shield(self._task)
         self._result_observed = True
         if self._status == OperationStatus.CANCELLED:
-            raise RavenError(
-                ErrorCode.OPERATION_CANCELLED,
+            raise OperationError(
+                self.operation.error_code.OPERATION_CANCELLED,
                 f"Operation task '{self.task_id}' was cancelled.",
             )
         if self._error is not None:
@@ -1226,11 +1098,11 @@ class OperationTask:
             payload = self.operation.error or {}
             code_value = payload.get("code")
             try:
-                code = ErrorCode(code_value)
+                code = self.operation.error_code(code_value)
             except (TypeError, ValueError):
-                code = ErrorCode.INTERNAL_ERROR
+                code = self.operation.error_code.INTERNAL_ERROR
             message = payload.get("message")
-            raise RavenError(
+            raise OperationError(
                 code,
                 message if isinstance(message, str) else "The operation failed.",
                 details=(
@@ -1279,7 +1151,7 @@ class OperationTask:
                 yield event
                 if (
                     event.task_id == self.task_id
-                    and event.type in _TERMINAL_TASK_EVENT_TYPES
+                    and event.type in self.operation.config.terminal_task_event_types
                 ):
                     return
 
@@ -1298,7 +1170,7 @@ class OperationTask:
             return
         cancellation = error or asyncio.CancelledError()
         try:
-            await self._publish_lifecycle(EventType.OPERATION_TASK_CANCELLED)
+            await self._publish_lifecycle(self.operation.event_type.OPERATION_TASK_CANCELLED)
         finally:
             self._status = OperationStatus.CANCELLED
             self._error = cancellation
@@ -1306,7 +1178,7 @@ class OperationTask:
 
     async def _publish_lifecycle(
         self,
-        event_type: EventType,
+        event_type: str,
         data: dict[str, Any] | None = None,
     ) -> bool:
         publication = asyncio.create_task(
@@ -1331,20 +1203,60 @@ class OperationManager:
         self,
         storage_dir: str | Path,
         *,
-        sync_interval: float = OPERATION_SYNC_INTERVAL_SECONDS,
-        max_cached_finished_operations: int = (
-            DEFAULT_FINISHED_OPERATION_CACHE_SIZE
-        ),
-        event_replay_page_size: int = DEFAULT_EVENT_REPLAY_PAGE_SIZE,
+        sync_interval: float | None = None,
+        max_cached_finished_operations: int | None = None,
+        event_replay_page_size: int | None = None,
+        event_type: type[EventType] | None = None,
+        error_code: type[ErrorCode] | None = None,
     ) -> None:
+        configured_event_type = event_type or EventType
+        configured_error_code = error_code or ErrorCode
+        event_defaults = EventConfig(
+            event_type=configured_event_type,
+            error_code=configured_error_code,
+        )
+        self.event_config = EventConfig(
+            event_type=configured_event_type,
+            error_code=configured_error_code,
+            replay_page_size=(
+                event_defaults.replay_page_size
+                if event_replay_page_size is None
+                else event_replay_page_size
+            ),
+        )
+        operation_defaults = OperationConfig(
+            event_type=configured_event_type,
+            error_code=configured_error_code,
+        )
+        self.operation_config = OperationConfig(
+            event_type=configured_event_type,
+            error_code=configured_error_code,
+            finished_operation_cache_size=(
+                operation_defaults.finished_operation_cache_size
+                if max_cached_finished_operations is None
+                else max_cached_finished_operations
+            ),
+            sync_interval_seconds=(
+                operation_defaults.sync_interval_seconds
+                if sync_interval is None
+                else sync_interval
+            ),
+        )
+        self.event_type = self.event_config.event_type
+        self.error_code = self.event_config.error_code
+        sync_interval = self.operation_config.sync_interval_seconds
+        max_cached_finished_operations = (
+            self.operation_config.finished_operation_cache_size
+        )
+        event_replay_page_size = self.event_config.replay_page_size
         if (
             isinstance(sync_interval, bool)
             or not isinstance(sync_interval, (int, float))
             or not math.isfinite(sync_interval)
             or sync_interval <= 0
         ):
-            raise RavenError(
-                ErrorCode.INVALID_OPERATION_SYNC_INTERVAL,
+            raise OperationError(
+                self.error_code.INVALID_OPERATION_SYNC_INTERVAL,
                 "Operation synchronization interval must be a finite positive number.",
             )
         if (
@@ -1352,20 +1264,23 @@ class OperationManager:
             or not isinstance(max_cached_finished_operations, int)
             or max_cached_finished_operations < 0
         ):
-            raise RavenError(
-                ErrorCode.INVALID_OPERATION_CACHE_SIZE,
+            raise OperationError(
+                self.error_code.INVALID_OPERATION_CACHE_SIZE,
                 "Finished operation cache size must be a non-negative integer.",
             )
-        EventStream._validate_page_size(event_replay_page_size)
+        EventStream._validate_page_size(event_replay_page_size, self.error_code)
         self.storage_dir = Path(storage_dir).expanduser().resolve()
         self.database_path = self.storage_dir / "operations.sqlite3"
         self.sync_interval = float(sync_interval)
         self.max_cached_finished_operations = max_cached_finished_operations
         self.event_replay_page_size = event_replay_page_size
-        self._store = SQLiteOperationStore(self.database_path)
+        self._store = SQLiteOperationStore(
+            self.database_path,
+            config=self.operation_config,
+        )
         self._operations: OrderedDict[str, Operation] = OrderedDict()
         self._sync_service = OperationSyncService(self, self.sync_interval)
-        self._sync_error: RavenError | None = None
+        self._sync_error: OperationError | None = None
         self._lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
@@ -1431,8 +1346,8 @@ class OperationManager:
     async def create(self, name: str) -> Operation:
         """Create, persist, and register a queued operation."""
         if not isinstance(name, str) or not name.strip():
-            raise RavenError(
-                ErrorCode.INVALID_OPERATION_NAME,
+            raise OperationError(
+                self.error_code.INVALID_OPERATION_NAME,
                 "Operation name cannot be empty.",
             )
         self._ensure_open()
@@ -1472,8 +1387,8 @@ class OperationManager:
 
         stored = await self._store.read_operation(key)
         if stored is None:
-            raise RavenError(
-                ErrorCode.OPERATION_NOT_FOUND,
+            raise OperationError(
+                self.error_code.OPERATION_NOT_FOUND,
                 f"Operation '{key}' was not found.",
             )
         operation = Operation.from_record(
@@ -1492,8 +1407,8 @@ class OperationManager:
         parsed_id = self._parse_operation_id(operation_id)
         stored = await self._store.read_operation(str(parsed_id))
         if stored is None:
-            raise RavenError(
-                ErrorCode.OPERATION_NOT_FOUND,
+            raise OperationError(
+                self.error_code.OPERATION_NOT_FOUND,
                 f"Operation '{parsed_id}' was not found.",
             )
         return OperationRecord.model_validate(stored)
@@ -1538,19 +1453,20 @@ class OperationManager:
         self,
         *,
         status: OperationStatus | str | None = None,
-        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        limit: int | None = None,
         after_operation_id: UUID | str | None = None,
     ) -> list[OperationRecord]:
         """List durable operations newest first without replaying their events."""
         self._ensure_open()
         await self.start()
+        limit = self.operation_config.page_size if limit is None else limit
         parsed_status = self._parse_status(status)
         parsed_cursor: UUID | None = None
         if after_operation_id is not None:
             parsed_cursor = self._parse_operation_id(after_operation_id)
             if await self._store.read_operation(str(parsed_cursor)) is None:
-                raise RavenError(
-                    ErrorCode.OPERATION_NOT_FOUND,
+                raise OperationError(
+                    self.error_code.OPERATION_NOT_FOUND,
                     f"Operation '{parsed_cursor}' was not found.",
                 )
         self._validate_page_size(limit)
@@ -1567,19 +1483,20 @@ class OperationManager:
     async def list_retryable_tasks(
         self,
         *,
-        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        limit: int | None = None,
         after_task_id: UUID | str | None = None,
     ) -> list[OperationTaskRecord]:
         """List failed tasks currently eligible for user-confirmed retry."""
         self._ensure_open()
         await self.start()
+        limit = self.operation_config.page_size if limit is None else limit
         self._validate_page_size(limit)
         parsed_cursor: UUID | None = None
         if after_task_id is not None:
-            parsed_cursor = Operation._parse_task_id(after_task_id)
+            parsed_cursor = self._parse_task_id(after_task_id)
             if await self._store.read_task(str(parsed_cursor)) is None:
-                raise RavenError(
-                    ErrorCode.OPERATION_TASK_NOT_FOUND,
+                raise OperationError(
+                    self.error_code.OPERATION_TASK_NOT_FOUND,
                     f"Operation task '{parsed_cursor}' was not found.",
                 )
 
@@ -1638,7 +1555,7 @@ class OperationManager:
 
         try:
             await self._store.checkpoint()
-        except RavenError as exc:
+        except OperationError as exc:
             await self._record_sync_failure(exc)
             raise
         return dirty_operation_ids
@@ -1700,7 +1617,7 @@ class OperationManager:
             store=self._store,
             health_check=self._ensure_sync_healthy,
             sync_failure=self._record_sync_failure,
-            replay_page_size=self.event_replay_page_size,
+            config=self.event_config,
         )
 
 
@@ -1790,7 +1707,7 @@ class OperationManager:
 
     async def _record_sync_failure(
         self,
-        error: RavenError,
+        error: OperationError,
         source_operation_id: str | None = None,
     ) -> None:
         if self._sync_error is None:
@@ -1812,33 +1729,53 @@ class OperationManager:
             raise self._sync_error
 
 
-    @staticmethod
-    def _parse_operation_id(operation_id: UUID | str) -> UUID:
+    def _parse_operation_id(self, operation_id: UUID | str) -> UUID:
         try:
             return operation_id if isinstance(operation_id, UUID) else UUID(operation_id)
         except (TypeError, ValueError) as exc:
-            raise RavenError(
-                ErrorCode.INVALID_OPERATION_ID,
+            raise OperationError(
+                self.error_code.INVALID_OPERATION_ID,
                 "operation_id must be a valid UUID.",
             ) from exc
 
 
-    @staticmethod
+    def _parse_task_id(self, task_id: UUID | str) -> UUID:
+        try:
+            return task_id if isinstance(task_id, UUID) else UUID(task_id)
+        except (TypeError, ValueError) as exc:
+            raise OperationError(
+                self.error_code.OPERATION_TASK_NOT_FOUND,
+                "task_id must be a valid UUID.",
+            ) from exc
+
+
     def _parse_status(
+        self,
         status: OperationStatus | str | None,
     ) -> OperationStatus | None:
-        return Operation._parse_status(status)
+        if status is None or isinstance(status, OperationStatus):
+            return status
+        try:
+            return OperationStatus(status)
+        except (TypeError, ValueError) as exc:
+            raise OperationError(
+                self.error_code.INVALID_OPERATION_STATUS,
+                f"Unknown operation status '{status}'.",
+            ) from exc
 
 
-    @staticmethod
-    def _validate_page_size(limit: int) -> None:
-        Operation._validate_page_size(limit)
+    def _validate_page_size(self, limit: int) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise OperationError(
+                self.error_code.INVALID_OPERATION_PAGE_SIZE,
+                "Operation page size must be a positive integer.",
+            )
 
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RavenError(
-                ErrorCode.OPERATION_MANAGER_CLOSED,
+            raise OperationError(
+                self.error_code.OPERATION_MANAGER_CLOSED,
                 "Operation manager is closed.",
             )
 
@@ -1857,8 +1794,8 @@ class OperationSyncService:
 
     async def start(self) -> None:
         if self._closed:
-            raise RavenError(
-                ErrorCode.OPERATION_MANAGER_CLOSED,
+            raise OperationError(
+                self._manager.error_code.OPERATION_MANAGER_CLOSED,
                 "Operation synchronization service is closed.",
             )
         if self._task is not None:
@@ -1890,7 +1827,7 @@ class OperationSyncService:
 
             try:
                 await self._manager.sync_dirty()
-            except RavenError:
+            except OperationError:
                 return
 
 
@@ -1908,11 +1845,16 @@ class OperationCleanupService:
         manager: OperationManager,
         retention: timedelta,
         *,
-        batch_size: int = DEFAULT_OPERATION_CLEANUP_BATCH_SIZE,
+        batch_size: int | None = None,
     ) -> None:
+        batch_size = (
+            manager.operation_config.cleanup_batch_size
+            if batch_size is None
+            else batch_size
+        )
         if retention < timedelta(0):
-            raise RavenError(
-                ErrorCode.INVALID_RETENTION,
+            raise OperationError(
+                manager.error_code.INVALID_RETENTION,
                 "retention cannot be negative.",
             )
         if (
@@ -1920,8 +1862,8 @@ class OperationCleanupService:
             or not isinstance(batch_size, int)
             or batch_size <= 0
         ):
-            raise RavenError(
-                ErrorCode.INVALID_CLEANUP_BATCH_SIZE,
+            raise OperationError(
+                manager.error_code.INVALID_CLEANUP_BATCH_SIZE,
                 "Cleanup batch size must be a positive integer.",
             )
         self._manager = manager
@@ -1952,7 +1894,7 @@ class OperationCleanupService:
                 try:
                     was_deleted = await self._manager._delete_finished(operation_id)
                 except Exception as exc:
-                    failures[operation_id] = error_payload(exc)
+                    failures[operation_id] = error_payload(exc, self._manager.error_code)
                     continue
 
                 if was_deleted:
