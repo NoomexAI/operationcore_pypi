@@ -7,10 +7,25 @@ name = "noomexai-operationcore"
 version = "0.1.0"
 description = "A durable asynchronous operation runtime for Python"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.txt"]
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "pydantic>=2.0,<3.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/NoomexAI/operationcore_pypi"
+Repository = "https://github.com/NoomexAI/operationcore_pypi"
+Issues = "https://github.com/NoomexAI/operationcore_pypi/issues"
+
 
 [tool.setuptools]
 package-dir = { "" = "src" }
