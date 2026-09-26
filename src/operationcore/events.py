@@ -33,6 +33,23 @@ class EventType(str):
     OPERATION_LIFECYCLE_TASK_FAILED = "operation.lifecycle.task.failed"
     OPERATION_LIFECYCLE_TASK_CANCELLED = "operation.lifecycle.task.cancelled"
 
+    @classmethod
+    def to_dict(cls) -> dict[str, str]:
+        """Return the inherited and locally defined event types."""
+        attributes: dict[str, None] = {}
+        for base in reversed(cls.__mro__):
+            if not issubclass(base, EventType):
+                continue
+            for attribute in vars(base):
+                if attribute.isupper():
+                    attributes[attribute] = None
+
+        return {
+            attribute: value
+            for attribute in attributes
+            if isinstance(value := getattr(cls, attribute, None), str)
+        }
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         for attribute, expected in vars(EventType).items():

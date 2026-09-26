@@ -38,6 +38,23 @@ class ErrorCode(str):
     OPERATION_RUNTIME_INVALID_CLEANUP_BATCH_SIZE = "operation-runtime:cleanup:invalid-batch-size"
     OPERATION_RUNTIME_INTERNAL_ERROR = "operation-runtime:internal-error"
 
+    @classmethod
+    def to_dict(cls) -> dict[str, str]:
+        """Return the inherited and locally defined error codes."""
+        attributes: dict[str, None] = {}
+        for base in reversed(cls.__mro__):
+            if not issubclass(base, ErrorCode):
+                continue
+            for attribute in vars(base):
+                if attribute.isupper():
+                    attributes[attribute] = None
+
+        return {
+            attribute: value
+            for attribute in attributes
+            if isinstance(value := getattr(cls, attribute, None), str)
+        }
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         for attribute, expected in vars(ErrorCode).items():

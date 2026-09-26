@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
+from typing import Any
 
 from .errors import ErrorCode
 from .events import EventType
@@ -14,6 +16,76 @@ from .stores.sqlite_store import SQLiteOperationStore
 
 class OperationCore:
     """Assemble configured operation machinery and expose its manager."""
+
+    @staticmethod
+    def describe_operation_store() -> str:
+        """Return a readable description of the required store interface."""
+        properties: list[str] = []
+        methods: list[str] = []
+
+        for name, member in vars(OperationStore).items():
+            if name.startswith("_"):
+                continue
+
+            if isinstance(member, property) and member.fget is not None:
+                return_type = OperationCore._format_annotation(
+                    inspect.signature(member.fget).return_annotation
+                )
+                properties.extend(
+                    OperationCore._describe_requirement(
+                        f"{name}: {return_type}",
+                        inspect.getdoc(member) or "",
+                    )
+                )
+                continue
+
+            if inspect.isfunction(member):
+                signature = inspect.signature(member)
+                signature = signature.replace(
+                    parameters=[
+                        parameter
+                        for parameter in signature.parameters.values()
+                        if parameter.name not in {"self", "cls"}
+                    ]
+                )
+                prefix = "async " if inspect.iscoroutinefunction(member) else ""
+                methods.extend(
+                    OperationCore._describe_requirement(
+                        f"{prefix}{name}{OperationCore._format_signature(signature)}",
+                        inspect.getdoc(member) or "",
+                    )
+                )
+
+        sections = [
+            "OperationStore requirements",
+            "",
+            "A custom store satisfies this protocol by providing these compatible "
+            "properties and methods. Inheriting from OperationStore is optional.",
+        ]
+        if properties:
+            sections.extend(("", "Properties", *properties))
+        if methods:
+            sections.extend(("", "Methods", *methods))
+        return "\n".join(sections)
+
+    @staticmethod
+    def _describe_requirement(signature: str, description: str) -> list[str]:
+        lines = [f"  {signature}"]
+        if description:
+            lines.append(f"    {description}")
+        return lines
+
+    @staticmethod
+    def _format_signature(signature: inspect.Signature) -> str:
+        return str(signature).replace("'", "")
+
+    @staticmethod
+    def _format_annotation(annotation: Any) -> str:
+        if annotation is inspect.Signature.empty:
+            return "Any"
+        if isinstance(annotation, str):
+            return annotation
+        return inspect.formatannotation(annotation)
 
     def __init__(
         self,
