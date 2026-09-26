@@ -167,6 +167,8 @@ error codes, operation names, and event data.
 pip install noomexai-operationcore
 ```
 
+Start with the runnable [`quick_start.py`](examples/quick_start.py) example.
+
 ## Quick start
 
 ```python

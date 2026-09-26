@@ -3,9 +3,12 @@
 
 # Keep the files required to build and publish the package.
 !/.gitignore
+!/examples/
+!/examples/**
 !/src/
 !/src/**
 !/LICENSE.txt
+!/MANIFEST.in
 !/pyproject.toml
 !/README.md
 
