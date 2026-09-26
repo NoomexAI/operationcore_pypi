@@ -1,4 +1,15 @@
-inspiration/
-plans/
-idea/
-tests/
+# Ignore everything in the project root by default.
+/*
+
+# Keep the files required to build and publish the package.
+!/.gitignore
+!/src/
+!/src/**
+!/LICENSE.txt
+!/pyproject.toml
+!/README.md
+
+# Ignore generated Python artifacts inside the source tree.
+**/__pycache__/
+*.py[cod]
+*.egg-info/
