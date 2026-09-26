@@ -14,6 +14,7 @@ from .async_utils import await_completion
 from .errors import ErrorCode, OperationError
 
 if TYPE_CHECKING:
+    from .records import OperationTaskRecord
     from .stores.protocol import OperationStore
     from .stores.transitions import LifecycleTransition
 
@@ -21,16 +22,28 @@ if TYPE_CHECKING:
 class EventType(str):
     """Lifecycle events required by the operation runtime."""
 
-    OPERATION_QUEUED = "operation.queued"
-    OPERATION_STARTED = "operation.started"
-    OPERATION_COMPLETED = "operation.completed"
-    OPERATION_FAILED = "operation.failed"
-    OPERATION_CANCELLED = "operation.cancelled"
-    OPERATION_TASK_QUEUED = "operation.task.queued"
-    OPERATION_TASK_STARTED = "operation.task.started"
-    OPERATION_TASK_COMPLETED = "operation.task.completed"
-    OPERATION_TASK_FAILED = "operation.task.failed"
-    OPERATION_TASK_CANCELLED = "operation.task.cancelled"
+    OPERATION_LIFECYCLE_QUEUED = "operation.lifecycle.queued"
+    OPERATION_LIFECYCLE_STARTED = "operation.lifecycle.started"
+    OPERATION_LIFECYCLE_COMPLETED = "operation.lifecycle.completed"
+    OPERATION_LIFECYCLE_FAILED = "operation.lifecycle.failed"
+    OPERATION_LIFECYCLE_CANCELLED = "operation.lifecycle.cancelled"
+    OPERATION_LIFECYCLE_TASK_QUEUED = "operation.lifecycle.task.queued"
+    OPERATION_LIFECYCLE_TASK_STARTED = "operation.lifecycle.task.started"
+    OPERATION_LIFECYCLE_TASK_COMPLETED = "operation.lifecycle.task.completed"
+    OPERATION_LIFECYCLE_TASK_FAILED = "operation.lifecycle.task.failed"
+    OPERATION_LIFECYCLE_TASK_CANCELLED = "operation.lifecycle.task.cancelled"
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        for attribute, expected in vars(EventType).items():
+            if not attribute.isupper() or not isinstance(expected, str):
+                continue
+            supplied = cls.__dict__.get(attribute, expected)
+            if supplied != expected:
+                raise TypeError(
+                    f"{cls.__name__} cannot override "
+                    f"EventType.{attribute}; add a new event type instead."
+                )
 
 
 class Event(BaseModel):
@@ -38,12 +51,12 @@ class Event(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    type: str
+    type: str = Field(min_length=1)
     data: dict[str, Any] = Field(default_factory=dict)
     operation_id: UUID | None = None
     task_id: UUID | None = None
     task_name: str | None = None
-    event_id: int | None = None
+    event_id: int | None = Field(default=None, ge=1)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_final: bool = False
 
@@ -101,7 +114,7 @@ class EventStream:
             self._raise_if_unhealthy()
             if self._finished:
                 raise OperationError(
-                    self.error_code.EVENT_STREAM_FINISHED,
+                    self.error_code.OPERATION_RUNTIME_EVENT_STREAM_FINISHED,
                     f"Operation '{self.operation_id}' is already finished.",
                 )
 
@@ -112,14 +125,57 @@ class EventStream:
                 }
             )
             commit = asyncio.create_task(
-                self._commit(
-                    persisted,
-                    transition,
-                    checkpoint=checkpoint,
-                )
+                self._store.append_event(persisted, transition)
             )
             generation, cancellation_requested = await await_completion(commit)
             self._apply_persisted_event(persisted, generation)
+            if checkpoint or event.is_final:
+                _, sync_cancelled = await await_completion(
+                    asyncio.create_task(self._sync_locked())
+                )
+                cancellation_requested = cancellation_requested or sync_cancelled
+            if cancellation_requested:
+                raise asyncio.CancelledError
+            return persisted
+
+    async def register_task(
+        self,
+        record: OperationTaskRecord,
+        event: Event,
+        transition: LifecycleTransition,
+        *,
+        checkpoint: bool = False,
+    ) -> Event:
+        """Atomically persist a task and its queued lifecycle event."""
+        self._ensure_open()
+        self._raise_if_unhealthy()
+
+        async with self._condition:
+            self._ensure_open()
+            await self._load()
+            self._raise_if_unhealthy()
+            if self._finished:
+                raise OperationError(
+                    self.error_code.OPERATION_RUNTIME_EVENT_STREAM_FINISHED,
+                    f"Operation '{self.operation_id}' is already finished.",
+                )
+
+            persisted = event.model_copy(
+                update={
+                    "operation_id": self.operation_id,
+                    "event_id": self._last_event_id + 1,
+                }
+            )
+            commit = asyncio.create_task(
+                self._store.register_task(record, persisted, transition)
+            )
+            generation, cancellation_requested = await await_completion(commit)
+            self._apply_persisted_event(persisted, generation)
+            if checkpoint:
+                _, sync_cancelled = await await_completion(
+                    asyncio.create_task(self._sync_locked())
+                )
+                cancellation_requested = cancellation_requested or sync_cancelled
             if cancellation_requested:
                 raise asyncio.CancelledError
             return persisted
@@ -137,7 +193,7 @@ class EventStream:
         async with self._condition:
             if self._cleanup_reserved:
                 raise OperationError(
-                    self.error_code.EVENT_STREAM_CLOSED,
+                    self.error_code.OPERATION_RUNTIME_EVENT_STREAM_CLOSED,
                     "Event stream is being removed.",
                 )
             await self._load()
@@ -157,7 +213,7 @@ class EventStream:
         async with self._condition:
             if self._cleanup_reserved:
                 raise OperationError(
-                    self.error_code.EVENT_STREAM_CLOSED,
+                    self.error_code.OPERATION_RUNTIME_EVENT_STREAM_CLOSED,
                     "Event stream is being removed.",
                 )
             await self._load()
@@ -238,7 +294,7 @@ class EventStream:
     def _ensure_open(self) -> None:
         if self._closed:
             raise OperationError(
-                self.error_code.EVENT_STREAM_CLOSED,
+                self.error_code.OPERATION_RUNTIME_EVENT_STREAM_CLOSED,
                 "Event stream is closed.",
             )
 
@@ -255,7 +311,7 @@ class EventStream:
     ) -> None:
         if after_event_id < 0:
             raise OperationError(
-                error_code.INVALID_EVENT_CURSOR,
+                error_code.OPERATION_RUNTIME_INVALID_EVENT_CURSOR,
                 "after_event_id cannot be negative.",
             )
 
@@ -268,7 +324,7 @@ class EventStream:
             return
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise OperationError(
-                error_code.INVALID_EVENT_PAGE_SIZE,
+                error_code.OPERATION_RUNTIME_INVALID_EVENT_PAGE_SIZE,
                 "Event page size must be a positive integer.",
             )
 
@@ -276,7 +332,7 @@ class EventStream:
         if after_event_id <= self._last_event_id:
             return
         raise OperationError(
-            self.error_code.EVENT_HISTORY_GAP,
+            self.error_code.OPERATION_RUNTIME_EVENT_HISTORY_GAP,
             "The requested event cursor is ahead of the recovered event history.",
             details={
                 "operation_id": str(self.operation_id),
@@ -293,18 +349,6 @@ class EventStream:
         self._finished = state.is_finished
         self._finished_at = state.finished_at
         self._loaded = True
-
-    async def _commit(
-        self,
-        event: Event,
-        transition: LifecycleTransition | None,
-        *,
-        checkpoint: bool,
-    ) -> int:
-        generation = await self._store.append_event(event, transition)
-        if checkpoint or event.is_final:
-            await self._sync_locked()
-        return generation
 
     def _apply_persisted_event(self, event: Event, generation: int) -> None:
         self._last_write_generation = generation
@@ -324,9 +368,9 @@ class EventStream:
             error = (
                 exc
                 if isinstance(exc, OperationError)
-                and exc.code == self.error_code.OPERATION_SYNC_FAILED
+                and exc.code == self.error_code.OPERATION_RUNTIME_SYNC_FAILED
                 else OperationError(
-                    self.error_code.OPERATION_SYNC_FAILED,
+                    self.error_code.OPERATION_RUNTIME_SYNC_FAILED,
                     "The operation store could not be synchronized to durable storage.",
                 )
             )

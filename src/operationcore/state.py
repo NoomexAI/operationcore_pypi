@@ -16,6 +16,15 @@ class LifecycleStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+    @property
+    def is_terminal(self) -> bool:
+        """Whether this status ends an operation or task lifecycle."""
+        return self in (
+            LifecycleStatus.COMPLETED,
+            LifecycleStatus.FAILED,
+            LifecycleStatus.CANCELLED,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class EventStreamState:

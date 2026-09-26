@@ -8,37 +8,47 @@ from typing import Any
 class ErrorCode(str):
     """Stable machine-readable errors used by the operation runtime."""
 
-    INVALID_OPERATION_NAME = "invalid_operation_name"
-    OPERATION_NOT_FOUND = "operation_not_found"
-    OPERATION_CANCELLED = "operation_cancelled"
-    OPERATION_INTERRUPTED = "operation_interrupted"
-    OPERATION_FINISHED = "operation_finished"
-    INVALID_OPERATION_ID = "invalid_operation_id"
-    INVALID_OPERATION_STATUS = "invalid_operation_status"
-    INVALID_OPERATION_PAGE_SIZE = "invalid_operation_page_size"
-    INVALID_OPERATION_CACHE_SIZE = "invalid_operation_cache_size"
-    OPERATION_MANAGER_CLOSED = "operation_manager_closed"
-    OPERATION_TASK_NOT_FOUND = "operation_task_not_found"
-    OPERATION_TASK_NOT_RETRYABLE = "operation_task_not_retryable"
-    OPERATION_TASK_ALREADY_RETRIED = "operation_task_already_retried"
-    INVALID_RETRY_INPUT = "invalid_retry_input"
+    OPERATION_RUNTIME_INVALID_NAME = "operation-runtime:invalid-name"
+    OPERATION_RUNTIME_NOT_FOUND = "operation-runtime:not-found"
+    OPERATION_RUNTIME_CANCELLED = "operation-runtime:cancelled"
+    OPERATION_RUNTIME_INTERRUPTED = "operation-runtime:interrupted"
+    OPERATION_RUNTIME_FINISHED = "operation-runtime:finished"
+    OPERATION_RUNTIME_INVALID_ID = "operation-runtime:invalid-id"
+    OPERATION_RUNTIME_INVALID_STATUS = "operation-runtime:invalid-status"
+    OPERATION_RUNTIME_INVALID_PAGE_SIZE = "operation-runtime:invalid-page-size"
+    OPERATION_RUNTIME_INVALID_CACHE_SIZE = "operation-runtime:invalid-cache-size"
+    OPERATION_RUNTIME_MANAGER_CLOSED = "operation-runtime:manager:closed"
+    OPERATION_RUNTIME_TASK_NOT_FOUND = "operation-runtime:task:not-found"
+    OPERATION_RUNTIME_TASK_NOT_RETRYABLE = "operation-runtime:task:not-retryable"
+    OPERATION_RUNTIME_TASK_ALREADY_RETRIED = "operation-runtime:task:already-retried"
+    OPERATION_RUNTIME_INVALID_RETRY_INPUT = "operation-runtime:retry-input:invalid"
 
-    EVENT_STREAM_CLOSED = "event_stream_closed"
-    EVENT_STREAM_FINISHED = "event_stream_finished"
-    INVALID_EVENT_CURSOR = "invalid_event_cursor"
-    INVALID_EVENT_PAGE_SIZE = "invalid_event_page_size"
-    EVENT_HISTORY_GAP = "event_history_gap"
-    OPERATION_SYNC_FAILED = "operation_sync_failed"
-    OPERATION_DATABASE_FAILED = "operation_database_failed"
-    OPERATION_DATABASE_IN_USE = "operation_database_in_use"
-    OPERATION_DATABASE_CORRUPTED = "operation_database_corrupted"
-    UNSUPPORTED_OPERATION_DATABASE_VERSION = (
-        "unsupported_operation_database_version"
-    )
-    INVALID_OPERATION_SYNC_INTERVAL = "invalid_operation_sync_interval"
-    INVALID_RETENTION = "invalid_retention"
-    INVALID_CLEANUP_BATCH_SIZE = "invalid_cleanup_batch_size"
-    INTERNAL_ERROR = "internal_error"
+    OPERATION_RUNTIME_EVENT_STREAM_CLOSED = "operation-runtime:event-stream:closed"
+    OPERATION_RUNTIME_EVENT_STREAM_FINISHED = "operation-runtime:event-stream:finished"
+    OPERATION_RUNTIME_INVALID_EVENT_CURSOR = "operation-runtime:event:invalid-cursor"
+    OPERATION_RUNTIME_INVALID_EVENT_PAGE_SIZE = "operation-runtime:event:invalid-page-size"
+    OPERATION_RUNTIME_EVENT_HISTORY_GAP = "operation-runtime:event:history-gap"
+    OPERATION_RUNTIME_SYNC_FAILED = "operation-runtime:sync:failed"
+    OPERATION_RUNTIME_DATABASE_FAILED = "operation-runtime:database:failed"
+    OPERATION_RUNTIME_DATABASE_IN_USE = "operation-runtime:database:in-use"
+    OPERATION_RUNTIME_DATABASE_CORRUPTED = "operation-runtime:database:corrupted"
+    OPERATION_RUNTIME_UNSUPPORTED_DATABASE_VERSION = "operation-runtime:database:unsupported-version"
+    OPERATION_RUNTIME_INVALID_SYNC_INTERVAL = "operation-runtime:sync:invalid-interval"
+    OPERATION_RUNTIME_INVALID_RETENTION = "operation-runtime:retention:invalid"
+    OPERATION_RUNTIME_INVALID_CLEANUP_BATCH_SIZE = "operation-runtime:cleanup:invalid-batch-size"
+    OPERATION_RUNTIME_INTERNAL_ERROR = "operation-runtime:internal-error"
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        for attribute, expected in vars(ErrorCode).items():
+            if not attribute.isupper() or not isinstance(expected, str):
+                continue
+            supplied = cls.__dict__.get(attribute, expected)
+            if supplied != expected:
+                raise TypeError(
+                    f"{cls.__name__} cannot override "
+                    f"ErrorCode.{attribute}; add a new error code instead."
+                )
 
 
 class OperationError(Exception):
@@ -74,6 +84,6 @@ def error_payload(
     if isinstance(error, OperationError):
         return error.as_payload()
     return {
-        "code": (error_code or ErrorCode).INTERNAL_ERROR,
+        "code": (error_code or ErrorCode).OPERATION_RUNTIME_INTERNAL_ERROR,
         "message": "An unexpected internal error occurred.",
     }
