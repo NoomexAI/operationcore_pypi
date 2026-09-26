@@ -18,7 +18,7 @@ class OperationCore:
     """Assemble configured operation machinery and expose its manager."""
 
     @staticmethod
-    def describe_operation_store() -> str:
+    def store_requirements() -> str:
         """Return a readable description of the required store interface."""
         properties: list[str] = []
         methods: list[str] = []
