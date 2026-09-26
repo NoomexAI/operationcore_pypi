@@ -969,7 +969,11 @@ class OperationManager:
         event_type: type[EventType],
         error_code: type[ErrorCode],
         settings: OperationSettings,
+        *,
+        enable_startup_cleanup: bool = False,
     ) -> None:
+        if not isinstance(enable_startup_cleanup, bool):
+            raise TypeError("enable_startup_cleanup must be a boolean")
         if not math.isfinite(settings.sync_interval_seconds):
             raise OperationError(
                 error_code.OPERATION_RUNTIME_INVALID_SYNC_INTERVAL,
@@ -979,6 +983,7 @@ class OperationManager:
         self.settings = settings
         self.event_type = event_type
         self.error_code = error_code
+        self.enable_startup_cleanup = enable_startup_cleanup
         self._operations: OrderedDict[UUID, Operation] = OrderedDict()
         self._sync_service = OperationSyncService(
             self,
@@ -997,6 +1002,8 @@ class OperationManager:
         self._lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
+        self._startup_cleanup_completed = False
+        self._startup_cleanup_result: OperationCleanupResult | None = None
         self._started = False
         self._closed = False
 
@@ -1005,14 +1012,26 @@ class OperationManager:
         return self._sync_error is None
 
     async def start(self) -> None:
+        """Start shared resources and run retention cleanup once."""
         async with self._lifecycle_lock:
             self._ensure_open()
             self._ensure_sync_healthy()
             if self._started:
                 return
             await self.store.start()
+            if (
+                self.enable_startup_cleanup
+                and self.cleanup is not None
+                and not self._startup_cleanup_completed
+            ):
+                self._startup_cleanup_result = await self.cleanup.run_once()
+                self._startup_cleanup_completed = True
             await self._sync_service.start()
             self._started = True
+
+    def get_startup_cleanup_result(self) -> OperationCleanupResult | None:
+        """Return the completed startup cleanup result, when available."""
+        return self._startup_cleanup_result
 
     async def recover(self) -> list[Operation]:
         """Finalize nonterminal operations left by an earlier process."""

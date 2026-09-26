@@ -95,10 +95,14 @@ class OperationCore:
         error_code: type[ErrorCode] | None = None,
         settings: OperationSettings | None = None,
         store: OperationStore | None = None,
+        enable_startup_cleanup: bool = False,
     ) -> None:
+        if not isinstance(enable_startup_cleanup, bool):
+            raise TypeError("enable_startup_cleanup must be a boolean")
         self.settings = settings or OperationSettings()
         self.event_type = event_type or EventType
         self.error_code = error_code or ErrorCode
+        self.enable_startup_cleanup = enable_startup_cleanup
         self._validate_catalog(self.event_type, EventType)
         self._validate_catalog(self.error_code, ErrorCode)
 
@@ -123,6 +127,7 @@ class OperationCore:
             event_type=self.event_type,
             error_code=self.error_code,
             settings=self.settings,
+            enable_startup_cleanup=self.enable_startup_cleanup,
         )
 
     @staticmethod
