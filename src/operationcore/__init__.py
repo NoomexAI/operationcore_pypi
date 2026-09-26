@@ -6,6 +6,7 @@ from .state import EventStreamState, LifecycleStatus
 from .stores import (
     LifecycleTransition,
     OperationStore,
+    SQLiteOperationStore,
 )
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "LifecycleTransition",
     "OperationError",
     "OperationStore",
+    "SQLiteOperationStore",
     "error_payload",
 ]

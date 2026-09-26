@@ -13,6 +13,7 @@ from ..state import LifecycleStatus
 class LifecycleTransition:
     """Projection changes committed atomically with a lifecycle event."""
 
+    operation_name: str | None = None
     operation_status: LifecycleStatus | None = None
     operation_error: dict[str, Any] | None = None
     task_id: UUID | None = None
@@ -32,5 +33,11 @@ class LifecycleTransition:
             raise ValueError(
                 "operation_error requires an operation status change."
             )
+        if self.operation_status is None and self.operation_name is not None:
+            raise ValueError(
+                "operation_name requires an operation status change."
+            )
+        if self.operation_name is not None and not self.operation_name.strip():
+            raise ValueError("operation_name must be non-empty when provided.")
         if self.task_status is None and self.task_error is not None:
             raise ValueError("task_error requires a task status change.")

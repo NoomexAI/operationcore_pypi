@@ -13,6 +13,10 @@ from .transitions import LifecycleTransition
 class OperationStore(Protocol):
     """Store operations currently required by an event stream."""
 
+    async def start(self) -> None:
+        """Open the store and initialize its durable state."""
+        ...
+
     @property
     def is_dirty(self) -> bool:
         """Whether committed writes have not reached the latest checkpoint."""
@@ -50,4 +54,8 @@ class OperationStore(Protocol):
 
     async def checkpoint(self) -> bool:
         """Synchronize committed writes to the store's checkpoint boundary."""
+        ...
+
+    async def close(self) -> None:
+        """Close the store and release its resources."""
         ...
